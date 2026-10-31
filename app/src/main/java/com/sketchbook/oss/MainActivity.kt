@@ -155,7 +155,8 @@ class MainActivity : AppCompatActivity(), SketchWorkspaceView.HostCallbacks {
     override fun onRequestImportImage() {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
-            type = "image/*"
+            type = "*/*"
+            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "application/octet-stream"))
         }
         try {
             @Suppress("DEPRECATION")
@@ -165,7 +166,7 @@ class MainActivity : AppCompatActivity(), SketchWorkspaceView.HostCallbacks {
                 type = "image/*"
             }
             @Suppress("DEPRECATION")
-            startActivityForResult(Intent.createChooser(fallback, "Import Image as Project"), REQ_IMPORT_IMAGE)
+            startActivityForResult(Intent.createChooser(fallback, "Import SketchBook TIFF or Image"), REQ_IMPORT_IMAGE)
         }
     }
 
@@ -175,14 +176,26 @@ class MainActivity : AppCompatActivity(), SketchWorkspaceView.HostCallbacks {
         if (requestCode == REQ_IMPORT_IMAGE && resultCode == Activity.RESULT_OK) {
             val uri: Uri = data?.data ?: return
             try {
-                contentResolver.openInputStream(uri)?.use { inputStream ->
-                    val decoded = BitmapFactory.decodeStream(inputStream)
-                    if (decoded != null) {
-                        val fileName = queryFileName(uri).substringBeforeLast(".")
-                        workspaceView.applyImportedBitmapAsNewProject(decoded, fileName)
-                    } else {
-                        workspaceView.showBanner("Could not decode selected image")
-                    }
+                val rawBytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                if (rawBytes == null || rawBytes.isEmpty()) {
+                    workspaceView.showBanner("Selected file is empty")
+                    return
+                }
+                val fileName = queryFileName(uri).substringBeforeLast(".")
+
+                // First check if it's a Multi-Layer SketchBook .tif or baseline .tif
+                val loadedTiffProj = ProjectStorageManager.tryLoadProjectFromTiffBytes(this, rawBytes, fileName)
+                if (loadedTiffProj != null) {
+                    workspaceView.applyLoadedMultiLayerProject(loadedTiffProj)
+                    return
+                }
+
+                // Otherwise decode standard PNG / JPG / WEBP bitmap
+                val decoded = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size)
+                if (decoded != null) {
+                    workspaceView.applyImportedBitmapAsNewProject(decoded, fileName)
+                } else {
+                    workspaceView.showBanner("Could not decode selected file")
                 }
             } catch (e: Exception) {
                 workspaceView.showBanner("Import error: ${e.message}")
@@ -222,10 +235,19 @@ class MainActivity : AppCompatActivity(), SketchWorkspaceView.HostCallbacks {
                 TopPopupState.EDIT_PRESET -> TopPopupState.NEW_SKETCH
                 TopPopupState.EXPORT_AS_MENU, TopPopupState.SHARE_AS_MENU -> TopPopupState.SHARE_EXPORT_MAIN
                 TopPopupState.NEW_SKETCH, TopPopupState.SAVE_MENU,
-                TopPopupState.SHARE_EXPORT_MAIN -> TopPopupState.BUTTON1_MAIN
-                TopPopupState.BUTTON1_MAIN, TopPopupState.BRUSH_MENU, TopPopupState.COLOR_MENU -> TopPopupState.NONE
+                TopPopupState.SHARE_EXPORT_MAIN, TopPopupState.PREFERENCES_SCREEN -> TopPopupState.BUTTON1_MAIN
+                TopPopupState.BLEND_MODE_MODAL, TopPopupState.COLOR_LABEL_MODAL -> TopPopupState.LAYER_SETTINGS_MODAL
+                TopPopupState.LAYER_ADJUST_MODAL -> {
+                    workspaceView.layerController.cleanupAdjustBackup(commit = true)
+                    TopPopupState.LAYER_SETTINGS_MODAL
+                }
                 else -> TopPopupState.NONE
             }
+            workspaceView.invalidate()
+            return
+        }
+        if (workspaceView.layerController.isLayerDockOpen) {
+            workspaceView.layerController.isLayerDockOpen = false
             workspaceView.invalidate()
             return
         }

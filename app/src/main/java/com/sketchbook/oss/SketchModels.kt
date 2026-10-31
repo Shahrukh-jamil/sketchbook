@@ -4,9 +4,14 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Rect
+import android.graphics.RectF
 import android.os.Build
 import android.util.DisplayMetrics
 import android.view.WindowManager
+import org.json.JSONArray
+import org.json.JSONObject
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -38,7 +43,13 @@ enum class TopPopupState {
     EXPORT_AS_MENU,
     SHARE_AS_MENU,
     BRUSH_MENU,
-    COLOR_MENU
+    COLOR_MENU,
+    BG_COLOR_MENU,
+    LAYER_SETTINGS_MODAL,
+    BLEND_MODE_MODAL,
+    COLOR_LABEL_MODAL,
+    LAYER_ADJUST_MODAL,
+    PREFERENCES_SCREEN
 }
 
 enum class NewSketchTab {
@@ -93,6 +104,301 @@ enum class BrushIconStyle {
     TEXTURE_SPLATTER,
     TEXTURE_NOISE,
     TEXTURE_GRID
+}
+
+enum class LayerBlendMode(val title: String, val groupIndex: Int) {
+    NORMAL("Normal", 0),
+
+    ALPHA_MASK("Alpha Mask", 1),
+    INVERSE_ALPHA_MASK("Inverse Alpha Mask", 1),
+
+    DARKEN("Darken", 2),
+    MULTIPLY("Multiply", 2),
+    COLOR_BURN("Color Burn", 2),
+    LINEAR_BURN("Linear Burn", 2),
+
+    LIGHTEN("Lighten", 3),
+    SCREEN("Screen", 3),
+    COLOR_DODGE("Color Dodge", 3),
+    LINEAR_DODGE("Linear Dodge (Add)", 3),
+    GLOW("Glow", 3),
+    SOFT_GLOW("Soft Glow", 3),
+
+    OVERLAY("Overlay", 4),
+    SOFT_LIGHT("Soft Light", 4),
+    HARD_LIGHT("Hard Light", 4),
+
+    HUE("Hue", 5),
+    SATURATION("Saturation", 5),
+    COLOR("Color", 5),
+    LUMINOSITY("Luminosity", 5);
+
+    companion object {
+        fun fromNameOrDefault(name: String): LayerBlendMode {
+            return values().firstOrNull { it.name == name || it.title.equals(name, ignoreCase = true) } ?: NORMAL
+        }
+    }
+}
+
+object ColorLabelPalette {
+    private const val PREF_KEY = "custom_color_label_names_v1"
+
+    // Index 0 = None, Indices 1..20 = 20 distinct curated colors
+    val colors: IntArray = intArrayOf(
+        Color.WHITE,               // 0: None
+        Color.rgb(230, 25, 25),    // 1: Crimson Red
+        Color.rgb(245, 130, 20),   // 2: Vivid Orange
+        Color.rgb(250, 220, 15),   // 3: Canary Yellow
+        Color.rgb(125, 225, 15),   // 4: Chartreuse Lime
+        Color.rgb(25, 195, 75),    // 5: Emerald Green
+        Color.rgb(0, 185, 165),    // 6: Teal Cyan
+        Color.rgb(15, 130, 235),   // 7: Cobalt Blue
+        Color.rgb(65, 60, 225),    // 8: Ultramarine
+        Color.rgb(165, 30, 235),   // 9: Electric Violet
+        Color.rgb(235, 40, 165),   // 10: Magenta Rose
+        Color.rgb(145, 145, 145),  // 11: Neutral Gray
+        Color.rgb(255, 110, 110),  // 12: Coral Salmon
+        Color.rgb(215, 165, 95),   // 13: Warm Ochre
+        Color.rgb(140, 90, 45),    // 14: Burnt Umber
+        Color.rgb(35, 135, 95),    // 15: Forest Pine
+        Color.rgb(85, 195, 245),   // 16: Sky Azure
+        Color.rgb(135, 120, 245),  // 17: Periwinkle
+        Color.rgb(215, 120, 235),  // 18: Orchid Lavender
+        Color.rgb(95, 115, 135),   // 19: Slate Steel
+        Color.rgb(45, 45, 50)      // 20: Charcoal Ink
+    )
+
+    val defaultNames: Array<String> = arrayOf(
+        "None",
+        "Red",
+        "Orange",
+        "Yellow",
+        "Lime",
+        "Green",
+        "Teal",
+        "Blue",
+        "Indigo",
+        "Violet",
+        "Magenta",
+        "Gray",
+        "Coral",
+        "Ochre",
+        "Umber",
+        "Forest",
+        "Sky",
+        "Periwinkle",
+        "Orchid",
+        "Slate",
+        "Charcoal"
+    )
+
+    val customNames: Array<String> = defaultNames.copyOf()
+
+    fun loadFromPrefs(context: Context) {
+        val prefs = context.getSharedPreferences("sketchbook_classic_prefs", Context.MODE_PRIVATE)
+        val raw = prefs.getString(PREF_KEY, null) ?: return
+        try {
+            val arr = JSONArray(raw)
+            for (i in 1 until min(customNames.size, arr.length())) {
+                val s = arr.optString(i, defaultNames[i]).trim()
+                customNames[i] = if (s.isNotEmpty()) s else defaultNames[i]
+            }
+        } catch (_: Exception) {}
+    }
+
+    fun saveToPrefs(context: Context) {
+        val arr = JSONArray()
+        for (s in customNames) arr.put(s)
+        context.getSharedPreferences("sketchbook_classic_prefs", Context.MODE_PRIVATE)
+            .edit()
+            .putString(PREF_KEY, arr.toString())
+            .apply()
+    }
+
+    fun toJsonArray(): JSONArray {
+        val arr = JSONArray()
+        for (s in customNames) arr.put(s)
+        return arr
+    }
+
+    fun fromJsonArray(arr: JSONArray?) {
+        if (arr == null) return
+        for (i in 1 until min(customNames.size, arr.length())) {
+            val s = arr.optString(i, defaultNames[i]).trim()
+            if (s.isNotEmpty()) customNames[i] = s
+        }
+    }
+}
+
+data class BackgroundProceduralConfig(
+    var studioSubTab: Int = 0,          // 0 = SURFACE, 1 = GRIDS, 2 = LIGHTING
+    var surfacePreset: Int = 0,         // 0=Smooth, 1=Cold Press, 2=Rough Canvas, 3=Charcoal Laid, 4=Halftone Dot, 5=Parchment
+    var grainIntensity: Float = 35f,    // 0..100
+    var textureScale: Float = 100f,     // 25..250
+    var warmthTint: Float = 0f,         // -50..50
+
+    var gridPreset: Int = 0,            // 0=None, 1=Square, 2=Isometric, 3=Perspective, 4=Dot Matrix, 5=Rule of Thirds
+    var gridSpacing: Float = 80f,       // 20..300
+    var gridOpacity: Float = 35f,       // 5..100
+    var gridSubdivisions: Float = 4f,   // 1..8
+    var invertGridContrast: Boolean = false,
+
+    var lightingPreset: Int = 0,        // 0=Flat, 1=Radial Vignette, 2=Linear Horizon, 3=Spotlight
+    var vignetteStrength: Float = 40f,  // 0..100
+    var vignetteSoftness: Float = 60f,  // 10..100
+    var focusElevation: Float = 50f     // 0..100
+) {
+    fun reset() {
+        surfacePreset = 0
+        grainIntensity = 35f
+        textureScale = 100f
+        warmthTint = 0f
+        gridPreset = 0
+        gridSpacing = 80f
+        gridOpacity = 35f
+        gridSubdivisions = 4f
+        invertGridContrast = false
+        lightingPreset = 0
+        vignetteStrength = 40f
+        vignetteSoftness = 60f
+        focusElevation = 50f
+    }
+
+    fun toJson(): JSONObject {
+        return JSONObject().apply {
+            put("surfacePreset", surfacePreset)
+            put("grainIntensity", grainIntensity.toDouble())
+            put("textureScale", textureScale.toDouble())
+            put("warmthTint", warmthTint.toDouble())
+            put("gridPreset", gridPreset)
+            put("gridSpacing", gridSpacing.toDouble())
+            put("gridOpacity", gridOpacity.toDouble())
+            put("gridSubdivisions", gridSubdivisions.toDouble())
+            put("invertGridContrast", invertGridContrast)
+            put("lightingPreset", lightingPreset)
+            put("vignetteStrength", vignetteStrength.toDouble())
+            put("vignetteSoftness", vignetteSoftness.toDouble())
+            put("focusElevation", focusElevation.toDouble())
+        }
+    }
+
+    fun fromJson(o: JSONObject?) {
+        if (o == null) return
+        surfacePreset = o.optInt("surfacePreset", 0).coerceIn(0, 5)
+        grainIntensity = o.optDouble("grainIntensity", 35.0).toFloat().coerceIn(0f, 100f)
+        textureScale = o.optDouble("textureScale", 100.0).toFloat().coerceIn(25f, 250f)
+        warmthTint = o.optDouble("warmthTint", 0.0).toFloat().coerceIn(-50f, 50f)
+        gridPreset = o.optInt("gridPreset", 0).coerceIn(0, 5)
+        gridSpacing = o.optDouble("gridSpacing", 80.0).toFloat().coerceIn(20f, 300f)
+        gridOpacity = o.optDouble("gridOpacity", 35.0).toFloat().coerceIn(5f, 100f)
+        gridSubdivisions = o.optDouble("gridSubdivisions", 4.0).toFloat().coerceIn(1f, 8f)
+        invertGridContrast = o.optBoolean("invertGridContrast", false)
+        lightingPreset = o.optInt("lightingPreset", 0).coerceIn(0, 3)
+        vignetteStrength = o.optDouble("vignetteStrength", 40.0).toFloat().coerceIn(0f, 100f)
+        vignetteSoftness = o.optDouble("vignetteSoftness", 60.0).toFloat().coerceIn(10f, 100f)
+        focusElevation = o.optDouble("focusElevation", 50.0).toFloat().coerceIn(0f, 100f)
+    }
+}
+
+class SketchLayer(
+    val id: String,
+    var name: String,
+    var bitmap: Bitmap,
+    var visible: Boolean = true,
+    var alphaLock: Boolean = false,
+    var locked: Boolean = false,
+    var clippingMask: Boolean = false,
+    var opacity: Float = 100f,
+    var blendMode: LayerBlendMode = LayerBlendMode.NORMAL,
+    var colorLabelIndex: Int = 0,
+    var temporalStrokesJson: String = ""
+) {
+    var thumbnailBitmap: Bitmap? = null
+    var isThumbnailDirty: Boolean = true
+    private val thumbPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+
+    /**
+     * Computes a 1-to-1 square thumbnail cropped tightly around the drawn strokes
+     * with a 12% margin, strictly clamped inside the canvas bounds [0, 0, W, H]
+     * so the preview never goes outside the canvas or distorts aspect ratio.
+     */
+    fun getOrUpdateThumbnail(): Bitmap {
+        val existing = thumbnailBitmap
+        if (!isThumbnailDirty && existing != null && !existing.isRecycled) {
+            return existing
+        }
+        val thumbSize = 240
+        val thumb = if (existing != null && !existing.isRecycled) {
+            existing
+        } else {
+            Bitmap.createBitmap(thumbSize, thumbSize, Bitmap.Config.ARGB_8888).also {
+                thumbnailBitmap = it
+            }
+        }
+        val c = Canvas(thumb)
+        c.drawColor(Color.WHITE)
+
+        if (!bitmap.isRecycled && bitmap.width > 0 && bitmap.height > 0) {
+            val w = bitmap.width
+            val h = bitmap.height
+            // Downsample scan with step to find non-transparent bounding box in < 0.8ms
+            val step = max(1, min(w, h) / 180)
+            var minX = w
+            var minY = h
+            var maxX = -1
+            var maxY = -1
+
+            val rowBuf = IntArray(w)
+            var y = 0
+            while (y < h) {
+                bitmap.getPixels(rowBuf, 0, w, 0, y, w, 1)
+                var x = 0
+                while (x < w) {
+                    if ((rowBuf[x] ushr 24) > 4) {
+                        if (x < minX) minX = x
+                        if (x > maxX) maxX = x
+                        if (y < minY) minY = y
+                        if (y > maxY) maxY = y
+                    }
+                    x += step
+                }
+                y += step
+            }
+
+            if (maxX >= minX && maxY >= minY) {
+                // Expand by step + 12% margin
+                val rawW = (maxX - minX + 1 + step * 2).toFloat()
+                val rawH = (maxY - minY + 1 + step * 2).toFloat()
+                val margin = max(16f, max(rawW, rawH) * 0.12f)
+                val maxCanvasSquare = min(w, h).toFloat()
+                val side = (max(rawW, rawH) + margin * 2f).coerceIn(64f, maxCanvasSquare)
+
+                val cx = (minX + maxX) * 0.5f
+                val cy = (minY + maxY) * 0.5f
+
+                // Strictly clamp inside [0, 0, w, h] so crop region never goes outside canvas
+                val left = (cx - side * 0.5f).coerceIn(0f, max(0f, w - side)).toInt()
+                val top = (cy - side * 0.5f).coerceIn(0f, max(0f, h - side)).toInt()
+                val right = min(w, (left + side).roundToInt())
+                val bottom = min(h, (top + side).roundToInt())
+
+                val srcRect = Rect(left, top, right, bottom)
+                val dstW = right - left
+                val dstH = bottom - top
+                if (dstW > 0 && dstH > 0) {
+                    val scale = min(thumbSize.toFloat() / dstW, thumbSize.toFloat() / dstH)
+                    val rw = dstW * scale
+                    val rh = dstH * scale
+                    val ox = (thumbSize - rw) * 0.5f
+                    val oy = (thumbSize - rh) * 0.5f
+                    c.drawBitmap(bitmap, srcRect, RectF(ox, oy, ox + rw, oy + rh), thumbPaint)
+                }
+            }
+        }
+
+        isThumbnailDirty = false
+        return thumb
+    }
 }
 
 data class SketchBrushItem(
@@ -344,6 +650,27 @@ data class CanvasPreset(
     var height: Int
 )
 
+private data class LayerSnapshotEntry(
+    val id: String,
+    val name: String,
+    val bitmapCopy: Bitmap,
+    val visible: Boolean,
+    val alphaLock: Boolean,
+    val locked: Boolean,
+    val clippingMask: Boolean,
+    val opacity: Float,
+    val blendMode: LayerBlendMode,
+    val colorLabelIndex: Int,
+    val temporalStrokesJson: String
+)
+
+private data class ProjectSnapshot(
+    val selectedLayerIndex: Int,
+    val backgroundColor: Int,
+    val backgroundVisible: Boolean,
+    val layers: List<LayerSnapshotEntry>
+)
+
 class SketchProjectState(
     var name: String = nextDefaultName(),
     var width: Int = 1080,
@@ -352,50 +679,169 @@ class SketchProjectState(
     var isSavedOnce: Boolean = false,
     var lastSavedPath: String? = null
 ) {
-    var canvasBitmap: Bitmap? = null
-    private val undoStack = ArrayDeque<Bitmap>()
-    private val redoStack = ArrayDeque<Bitmap>()
+    // Index 0 = TOP layer, layers.lastIndex = BOTTOM drawing layer (above Background)
+    val layers = mutableListOf<SketchLayer>()
+    var selectedLayerIndex: Int = 0
+    var backgroundColor: Int = Color.WHITE
+    var backgroundVisible: Boolean = true
+    val backgroundConfig = BackgroundProceduralConfig()
+    private var nextLayerNumber: Int = 1
 
-    fun ensureCanvasBitmap(): Bitmap {
+    private val undoStack = ArrayDeque<ProjectSnapshot>()
+    private val redoStack = ArrayDeque<ProjectSnapshot>()
+
+    fun createBlankLayerBitmap(): Bitmap {
         val targetW = width.coerceIn(1, 8192)
         val targetH = height.coerceIn(1, 8192)
-
-        var bmp = canvasBitmap
-        if (bmp == null || bmp.isRecycled || bmp.width != targetW || bmp.height != targetH) {
-            bmp = try {
-                Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
-            } catch (_: OutOfMemoryError) {
-                System.gc()
-                Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
-            }
-            val c = Canvas(bmp!!)
-            c.drawColor(Color.TRANSPARENT)
-            canvasBitmap = bmp
+        val bmp = try {
+            Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+        } catch (_: OutOfMemoryError) {
+            System.gc()
+            Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
         }
-        return bmp!!
+        bmp.eraseColor(Color.TRANSPARENT)
+        return bmp
+    }
+
+    fun ensureLayersInitialized() {
+        if (layers.isEmpty()) {
+            val firstBmp = createBlankLayerBitmap()
+            layers.add(
+                SketchLayer(
+                    id = "layer_${System.currentTimeMillis()}_1",
+                    name = "Layer 1",
+                    bitmap = firstBmp
+                )
+            )
+            nextLayerNumber = 2
+            selectedLayerIndex = 0
+        }
+        selectedLayerIndex = selectedLayerIndex.coerceIn(0, layers.lastIndex)
+    }
+
+    fun activeLayer(): SketchLayer {
+        ensureLayersInitialized()
+        return layers[selectedLayerIndex]
+    }
+
+    fun ensureCanvasBitmap(): Bitmap {
+        val layer = activeLayer()
+        val targetW = width.coerceIn(1, 8192)
+        val targetH = height.coerceIn(1, 8192)
+        if (layer.bitmap.isRecycled || layer.bitmap.width != targetW || layer.bitmap.height != targetH) {
+            layer.bitmap = createBlankLayerBitmap()
+            layer.isThumbnailDirty = true
+        }
+        return layer.bitmap
+    }
+
+    fun markActiveLayerDirty() {
+        if (layers.isNotEmpty() && selectedLayerIndex in layers.indices) {
+            layers[selectedLayerIndex].isThumbnailDirty = true
+        }
+        isDirty = true
+    }
+
+    /**
+     * Adds a new transparent layer on TOP (index 0) and selects it.
+     */
+    fun addNewLayerOnTop(): SketchLayer {
+        ensureLayersInitialized()
+        pushUndoSnapshot()
+        val usedNums = layers.mapNotNull {
+            it.name.removePrefix("Layer "). removePrefix("Layer").trim().toIntOrNull()
+        }.toSet()
+        while (usedNums.contains(nextLayerNumber)) {
+            nextLayerNumber++
+        }
+        val newLayer = SketchLayer(
+            id = "layer_${System.currentTimeMillis()}_$nextLayerNumber",
+            name = "Layer $nextLayerNumber",
+            bitmap = createBlankLayerBitmap()
+        )
+        nextLayerNumber++
+        layers.add(0, newLayer)
+        selectedLayerIndex = 0
+        isDirty = true
+        return newLayer
+    }
+
+    private fun captureCurrentSnapshot(): ProjectSnapshot {
+        ensureLayersInitialized()
+        val entries = layers.map { l ->
+            LayerSnapshotEntry(
+                id = l.id,
+                name = l.name,
+                bitmapCopy = l.bitmap.copy(Bitmap.Config.ARGB_8888, true),
+                visible = l.visible,
+                alphaLock = l.alphaLock,
+                locked = l.locked,
+                clippingMask = l.clippingMask,
+                opacity = l.opacity,
+                blendMode = l.blendMode,
+                colorLabelIndex = l.colorLabelIndex,
+                temporalStrokesJson = l.temporalStrokesJson
+            )
+        }
+        return ProjectSnapshot(
+            selectedLayerIndex = selectedLayerIndex,
+            backgroundColor = backgroundColor,
+            backgroundVisible = backgroundVisible,
+            layers = entries
+        )
+    }
+
+    private fun applySnapshot(snap: ProjectSnapshot) {
+        for (l in layers) {
+            if (!l.bitmap.isRecycled) l.bitmap.recycle()
+            l.thumbnailBitmap?.let { if (!it.isRecycled) it.recycle() }
+        }
+        layers.clear()
+        for (e in snap.layers) {
+            layers.add(
+                SketchLayer(
+                    id = e.id,
+                    name = e.name,
+                    bitmap = e.bitmapCopy.copy(Bitmap.Config.ARGB_8888, true),
+                    visible = e.visible,
+                    alphaLock = e.alphaLock,
+                    locked = e.locked,
+                    clippingMask = e.clippingMask,
+                    opacity = e.opacity,
+                    blendMode = e.blendMode,
+                    colorLabelIndex = e.colorLabelIndex,
+                    temporalStrokesJson = e.temporalStrokesJson
+                ).apply { isThumbnailDirty = true }
+            )
+        }
+        selectedLayerIndex = snap.selectedLayerIndex.coerceIn(0, max(0, layers.lastIndex))
+        backgroundColor = snap.backgroundColor
+        backgroundVisible = snap.backgroundVisible
+    }
+
+    private fun recycleSnapshot(snap: ProjectSnapshot) {
+        for (e in snap.layers) {
+            if (!e.bitmapCopy.isRecycled) e.bitmapCopy.recycle()
+        }
     }
 
     fun pushUndoSnapshot() {
-        val current = canvasBitmap ?: return
-        if (current.isRecycled) return
+        ensureLayersInitialized()
         try {
-            val copyBmp = current.copy(Bitmap.Config.ARGB_8888, true)
-            undoStack.addLast(copyBmp)
+            val snap = captureCurrentSnapshot()
+            undoStack.addLast(snap)
 
-            val bytesPerBmp = (current.width.toLong() * current.height.toLong() * 4L).coerceAtLeast(1L)
-            val maxSteps = (160_000_000L / bytesPerBmp).toInt().coerceIn(3, 18)
+            val bytesPerLayer = (width.toLong() * height.toLong() * 4L).coerceAtLeast(1L)
+            val bytesPerSnap = (bytesPerLayer * max(1, layers.size)).coerceAtLeast(1L)
+            val maxSteps = (180_000_000L / bytesPerSnap).toInt().coerceIn(3, 14)
             while (undoStack.size > maxSteps) {
-                val old = undoStack.removeFirst()
-                if (!old.isRecycled) old.recycle()
+                recycleSnapshot(undoStack.removeFirst())
             }
-            for (s in redoStack) {
-                if (!s.isRecycled) s.recycle()
-            }
+            for (r in redoStack) recycleSnapshot(r)
             redoStack.clear()
         } catch (_: OutOfMemoryError) {
             if (undoStack.isNotEmpty()) {
-                val old = undoStack.removeFirst()
-                if (!old.isRecycled) old.recycle()
+                recycleSnapshot(undoStack.removeFirst())
             }
         }
     }
@@ -405,38 +851,38 @@ class SketchProjectState(
 
     fun undo(): Boolean {
         if (undoStack.isEmpty()) return false
-        val current = canvasBitmap
-        if (current != null && !current.isRecycled) {
-            redoStack.addLast(current)
-        }
-        canvasBitmap = undoStack.removeLast()
+        try {
+            redoStack.addLast(captureCurrentSnapshot())
+        } catch (_: OutOfMemoryError) {}
+        val prev = undoStack.removeLast()
+        applySnapshot(prev)
+        recycleSnapshot(prev)
         isDirty = true
         return true
     }
 
     fun redo(): Boolean {
         if (redoStack.isEmpty()) return false
-        val current = canvasBitmap
-        if (current != null && !current.isRecycled) {
-            undoStack.addLast(current)
-        }
-        canvasBitmap = redoStack.removeLast()
+        try {
+            undoStack.addLast(captureCurrentSnapshot())
+        } catch (_: OutOfMemoryError) {}
+        val next = redoStack.removeLast()
+        applySnapshot(next)
+        recycleSnapshot(next)
         isDirty = true
         return true
     }
 
     fun releaseAll() {
-        canvasBitmap?.let { if (!it.isRecycled) it.recycle() }
-        canvasBitmap = null
-        for (s in undoStack) if (!s.isRecycled) s.recycle()
-        for (s in redoStack) if (!s.isRecycled) s.recycle()
+        for (l in layers) {
+            if (!l.bitmap.isRecycled) l.bitmap.recycle()
+            l.thumbnailBitmap?.let { if (!it.isRecycled) it.recycle() }
+        }
+        layers.clear()
+        for (s in undoStack) recycleSnapshot(s)
+        for (s in redoStack) recycleSnapshot(s)
         undoStack.clear()
         redoStack.clear()
-    }
-
-    fun calcMegapixels(): Float {
-        if (width <= 0 || height <= 0) return 0f
-        return (width.toLong() * height.toLong()) / 1_000_000f
     }
 
     companion object {

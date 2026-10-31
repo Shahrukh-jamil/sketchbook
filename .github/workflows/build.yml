@@ -2,7 +2,7 @@ name: Build SketchBook APK
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, dev ]
   workflow_dispatch:
 
 permissions:
@@ -42,11 +42,6 @@ jobs:
           "
           else
             keytool -genkeypair -v -keystore app/release-key.jks -alias release -keyalg RSA -keysize 2048 -validity 10000 -storepass android123 -keypass android123 -dname "CN=SketchBookOSS, OU=Dev, O=OSS, L=City, S=State, C=US"
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add app/release-key.jks
-            git commit -m "Persist release-key.jks for seamless APK updates [skip ci]" || true
-            git push origin HEAD:main || true
           fi
 
       - name: Build Release APK
@@ -58,33 +53,3 @@ jobs:
           name: SketchBook-APK
           path: app/build/outputs/apk/release/app-release.apk
           retention-days: 7
-
-      - name: Multi-Cloud File Uploads
-        run: |
-          APK_PATH="app/build/outputs/apk/release/app-release.apk"
-          FINAL_APK_NAME="SketchBook.apk"
-          cp "$APK_PATH" "$FINAL_APK_NAME"
-
-          echo "### 📱 Download Links for SketchBook" >> $GITHUB_STEP_SUMMARY
-
-          log_upload() {
-            local service="$1"
-            local url="$2"
-            if [[ -n "$url" && "$url" =~ ^https?:// ]]; then
-              echo "✅ $service: $url"
-              echo "- **$service:** [$url]($url)" >> $GITHUB_STEP_SUMMARY
-            else
-              echo "❌ $service: Failed"
-            fi
-          }
-
-          URL_CATBOX=$(curl -s -A "Mozilla/5.0" -F "reqtype=fileupload" -F "fileToUpload=@$FINAL_APK_NAME" https://catbox.moe/user/api.php 2>/dev/null || true)
-          log_upload "Catbox.moe" "$URL_CATBOX"
-
-          URL_LITTER=$(curl -s -A "Mozilla/5.0" -F "reqtype=fileupload" -F "time=72h" -F "fileToUpload=@$FINAL_APK_NAME" https://litterbox.catbox.moe/resources/internals/api.php 2>/dev/null || true)
-          log_upload "Litterbox" "$URL_LITTER"
-
-          URL_TEMP=$(curl -s -A "Mozilla/5.0" -F "file=@$FINAL_APK_NAME" https://temp.sh/upload 2>/dev/null || true)
-          log_upload "Temp.sh" "$URL_TEMP"
-
-          exit 0

@@ -3,15 +3,22 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 val runNum = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
+val refName = System.getenv("GITHUB_REF_NAME") ?: "main"
+val isDevBranch = (refName == "dev")
+
 android {
     namespace = "com.sketchbook.oss"
     compileSdk = 34
     defaultConfig {
         applicationId = "com.sketchbook.app"
+        if (isDevBranch) {
+            applicationIdSuffix = ".dev"
+        }
         minSdk = 24
         targetSdk = 34
         versionCode = 10 + runNum
-        versionName = "1.1.$runNum"
+        versionName = if (isDevBranch) "1.2.$runNum-dev" else "1.2.$runNum"
+        manifestPlaceholders["appLabel"] = if (isDevBranch) "SketchBook [DEV]" else "SketchBook"
     }
     signingConfigs {
         create("release") {

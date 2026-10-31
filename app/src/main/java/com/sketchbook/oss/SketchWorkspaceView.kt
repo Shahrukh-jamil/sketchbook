@@ -1,8 +1,6 @@
 package com.sketchbook.oss
 
 import android.app.AlertDialog
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
@@ -10,27 +8,19 @@ import android.graphics.DashPathEffect
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.PointF
-import android.graphics.PorterDuff
-import android.graphics.PorterDuffXfermode
-import android.graphics.RadialGradient
 import android.graphics.RectF
-import android.graphics.Shader
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.widget.EditText
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
 import kotlin.math.abs
 import kotlin.math.atan2
-import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
-import kotlin.math.sin
-import kotlin.random.Random
 
 enum class InlineEditField {
     NONE,
@@ -65,12 +55,12 @@ class SketchWorkspaceView(
     var project = SketchProjectState(width = hwScreenSize.first, height = hwScreenSize.second)
     val customPresets = ProjectStorageManager.loadCustomPresets(context)
     val brushAndColorModal = BrushAndColorModal(this)
+    val layerController = LayerDockAndModalsController(this)
 
     var popupState: TopPopupState = TopPopupState.NONE
     var newSketchTab: NewSketchTab = NewSketchTab.PLUS_CUSTOM
     var activeInlineField: InlineEditField = InlineEditField.NONE
 
-    // Async Saving Lock & Non-Closable Saving Modal State
     @Volatile
     var isSavingInProgress: Boolean = false
     @Volatile
@@ -81,8 +71,9 @@ class SketchWorkspaceView(
     var savingProgressFraction: Float = -1f
     private var savingAnimAngle: Float = 0f
 
-    // Eyedropper Mode & Animated Export Duration
     private var isCanvasEyedropperActive: Boolean = false
+    private var eyedropperForBackground: Boolean = false
+
     var customWidthInput: Int = hwScreenSize.first
     var customHeightInput: Int = hwScreenSize.second
     var isRatioLocked: Boolean = false
@@ -101,7 +92,6 @@ class SketchWorkspaceView(
     private var isScrollingPresets: Boolean = false
     private var longPressRunnable: Runnable? = null
 
-    // Pivot-Locked SketchBook Affine Transform Matrix
     private val userTransformMatrix = Matrix()
     private val viewMatrix = Matrix()
     private val inverseViewMatrix = Matrix()
@@ -113,7 +103,6 @@ class SketchWorkspaceView(
     private var prevMidX: Float = 0f
     private var prevMidY: Float = 0f
 
-    // 1-Finger / Stylus Drawing with 2-Finger Pinch Guard
     private data class QueuedStrokeSample(val pt: PointF, val pressure: Float)
     private val pendingStrokeSamples = mutableListOf<QueuedStrokeSample>()
     private var isDrawingStroke: Boolean = false
@@ -125,24 +114,12 @@ class SketchWorkspaceView(
     private var smoothY = 0f
     private var lastStrokeSpeed = 0f
     private var smudgeCarryColor: Int = Color.WHITE
-
-    
-    
     private val procHistoryPts = mutableListOf<PointF>()
 
-    private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.FILL
-        strokeCap = Paint.Cap.ROUND
-        strokeJoin = Paint.Join.ROUND
-    }
-    private val clearXfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
-    private val multiplyXfermode = PorterDuffXfermode(PorterDuff.Mode.MULTIPLY)
-    private val addXfermode = PorterDuffXfermode(PorterDuff.Mode.ADD)
     private val bitmapPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
 
     private var statusBannerText: String? = null
     private var statusBannerExpiry: Long = 0L
-    private val animStartNano = System.nanoTime()
 
     private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
@@ -162,7 +139,7 @@ class SketchWorkspaceView(
         customWidthInput = last.first
         customHeightInput = last.second
         lockedAspectRatio = customWidthInput.toDouble() / max(1, customHeightInput).toDouble()
-        project.ensureCanvasBitmap()
+        project.ensureLayersInitialized()
     }
 
     fun resetCanvasTransform() {
@@ -171,8 +148,9 @@ class SketchWorkspaceView(
         invalidate()
     }
 
-    fun activateOnCanvasEyedropper() {
+    fun activateOnCanvasEyedropper(forBackground: Boolean = false) {
         isCanvasEyedropperActive = true
+        eyedropperForBackground = forBackground
         showBanner("Tap anywhere on canvas to pick color")
         invalidate()
     }
@@ -236,13 +214,19 @@ class SketchWorkspaceView(
         val sideFrame = 0f
         val pal = uiPalette
 
+        // If full-screen Preferences is open, render it directly
+        if (popupState == TopPopupState.PREFERENCES_SCREEN) {
+            layerController.drawActiveLayerModal(canvas, w, h, popupState)
+            return
+        }
+
         // 1. Draw Workspace Backdrop
         canvas.drawColor(pal.workspaceBackdrop)
 
-        // 2. Compute Base Fitted Canvas Rect & Apply Pivot-Locked User Transform Matrix
+        // 2. Render Multi-Layer Composite & Apply Pivot-Locked User Transform Matrix
         val availW = w
         val availH = h - topBarH
-        val bmp = project.ensureCanvasBitmap()
+        val compositeBmp = LayerStudioCompositor.renderProjectComposite(project, forExport = false)
         val projW = max(1, project.width).toFloat()
         val projH = max(1, project.height).toFloat()
         val fitScale = min(availW / projW, availH / projH)
@@ -257,7 +241,7 @@ class SketchWorkspaceView(
         }
 
         viewMatrix.reset()
-        viewMatrix.postScale(baseDrawW / bmp.width.toFloat(), baseDrawH / bmp.height.toFloat())
+        viewMatrix.postScale(baseDrawW / compositeBmp.width.toFloat(), baseDrawH / compositeBmp.height.toFloat())
         viewMatrix.postTranslate(baseLeft, baseTop)
         viewMatrix.postConcat(userTransformMatrix)
         viewMatrix.invert(inverseViewMatrix)
@@ -266,25 +250,34 @@ class SketchWorkspaceView(
         canvas.clipRect(0f, topBarH, w, h)
         canvas.concat(viewMatrix)
 
-        val bmpRect = RectF(0f, 0f, bmp.width.toFloat(), bmp.height.toFloat())
+        val bmpRect = RectF(0f, 0f, compositeBmp.width.toFloat(), compositeBmp.height.toFloat())
         canvas.clipRect(bmpRect)
-        bgPaint.style = Paint.Style.FILL
-        bgPaint.color = pal.paperTint
-        canvas.drawRect(0.5f, 0.5f, bmp.width - 0.5f, bmp.height - 0.5f, bgPaint)
-        canvas.drawBitmap(bmp, 0f, 0f, bitmapPaint)
+        canvas.drawBitmap(compositeBmp, 0f, 0f, bitmapPaint)
         canvas.restore()
 
-        // 3. Draw Bottom Dot
-        val dotY = h - 136f * sx
-        val dotRadius = 15.5f * sx
-        if (popupState != TopPopupState.BRUSH_MENU && popupState != TopPopupState.COLOR_MENU) {
+        // 3. Draw Right-Side Layer Dock (if open)
+        layerController.drawLayerDock(canvas, w, h)
+
+        // 4. Draw Bottom Dot (when no floating 3-circle modal is active)
+        val isThreeCircleModalOpen = (
+            popupState == TopPopupState.BRUSH_MENU ||
+            popupState == TopPopupState.COLOR_MENU ||
+            popupState == TopPopupState.BG_COLOR_MENU ||
+            popupState == TopPopupState.LAYER_SETTINGS_MODAL ||
+            popupState == TopPopupState.BLEND_MODE_MODAL ||
+            popupState == TopPopupState.COLOR_LABEL_MODAL ||
+            popupState == TopPopupState.LAYER_ADJUST_MODAL
+        )
+        if (!isThreeCircleModalOpen) {
+            val dotY = h - 136f * sx
+            val dotRadius = 15.5f * sx
             SketchIcons.drawBottomCenterDot(canvas, w / 2f, dotY, dotRadius)
         }
 
-        // 4. Draw Top Menu Bar
+        // 5. Draw Top Menu Bar
         drawTopMenuBar(canvas, w, topBarH, sideFrame, pal)
 
-        // 5. Draw Active Popup Menu or 1-to-1 Brush / Color Modal
+        // 6. Draw Active Popup Menu or Modal
         currentPopupBounds.setEmpty()
         when (popupState) {
             TopPopupState.NONE -> {}
@@ -296,23 +289,35 @@ class SketchWorkspaceView(
             TopPopupState.EXPORT_AS_MENU -> drawFormatListMenu(canvas, sideFrame, topBarH, sx, "Export As", pal)
             TopPopupState.SHARE_AS_MENU -> drawFormatListMenu(canvas, sideFrame, topBarH, sx, "Share As", pal)
             TopPopupState.BRUSH_MENU -> {
-                brushAndColorModal.draw(canvas, w, h, isColorMode = false)
+                brushAndColorModal.draw(canvas, w, h, isColorMode = false, isBgColorMode = false)
                 currentPopupBounds.set(brushAndColorModal.outerCardRect)
             }
             TopPopupState.COLOR_MENU -> {
-                brushAndColorModal.draw(canvas, w, h, isColorMode = true)
+                brushAndColorModal.draw(canvas, w, h, isColorMode = true, isBgColorMode = false)
                 currentPopupBounds.set(brushAndColorModal.outerCardRect)
+            }
+            TopPopupState.BG_COLOR_MENU -> {
+                brushAndColorModal.draw(canvas, w, h, isColorMode = true, isBgColorMode = true)
+                currentPopupBounds.set(brushAndColorModal.outerCardRect)
+            }
+            TopPopupState.LAYER_SETTINGS_MODAL,
+            TopPopupState.BLEND_MODE_MODAL,
+            TopPopupState.COLOR_LABEL_MODAL,
+            TopPopupState.LAYER_ADJUST_MODAL,
+            TopPopupState.PREFERENCES_SCREEN -> {
+                layerController.drawActiveLayerModal(canvas, w, h, popupState)
+                currentPopupBounds.set(layerController.modalOuterRect)
             }
         }
 
-        // 6. Non-Closable "Saving sketch..." Modal Overlay (Prevents multi-click & shows live progress)
+        // 7. Non-Closable "Saving sketch..." Modal Overlay
         if (isSavingInProgress) {
             drawSavingModalOverlay(canvas, w, h, sx)
             savingAnimAngle = (savingAnimAngle + 12f) % 360f
             postInvalidateOnAnimation()
         }
 
-        // 7. Status Banner
+        // 8. Status Banner
         val now = System.currentTimeMillis()
         val bannerMsg = statusBannerText
         if (bannerMsg != null && now < statusBannerExpiry && !isSavingInProgress) {
@@ -330,7 +335,6 @@ class SketchWorkspaceView(
             canvas.drawRect(bx, by, bx + bw, by + bh, borderPaint)
             canvas.drawText(bannerMsg, w / 2f, by + bh * 0.64f, textPaint)
         }
-
     }
 
     private fun drawSavingModalOverlay(canvas: Canvas, w: Float, h: Float, sx: Float) {
@@ -370,23 +374,8 @@ class SketchWorkspaceView(
         subTextPaint.textSize = 25f * sx
         subTextPaint.textAlign = Paint.Align.LEFT
         canvas.drawText(ellipsize(subStr, subTextPaint, maxTextW), textLeft, spinCy + 38f * sx, subTextPaint)
-
-        if (savingProgressFraction >= 0f) {
-            val barLeft = cardRect.left + 42f * sx
-            val barRight = cardRect.right - 42f * sx
-            val barTop = cardRect.bottom - 52f * sx
-            val barBot = cardRect.bottom - 30f * sx
-            bgPaint.color = Color.rgb(215, 220, 228)
-            canvas.drawRect(barLeft, barTop, barRight, barBot, bgPaint)
-            val fillW = (barRight - barLeft) * savingProgressFraction.coerceIn(0f, 1f)
-            bgPaint.color = Color.rgb(55, 116, 205)
-            canvas.drawRect(barLeft, barTop, barLeft + fillW, barBot, bgPaint)
-        }
     }
 
-    // ==========================================================================
-    // TOP BAR (Buttons 1 [Menu], 2 [Undo], 3 [Redo], 5 [Brush], 6 [Color] Active)
-    // ==========================================================================
     private fun drawTopMenuBar(canvas: Canvas, w: Float, topBarH: Float, sideFrame: Float, pal: ModUiPalette) {
         bgPaint.style = Paint.Style.FILL
         bgPaint.color = pal.topBarBg
@@ -400,7 +389,11 @@ class SketchWorkspaceView(
         val slotW = innerW / 8f
         val cy = topBarH / 2f
 
-        if (popupState != TopPopupState.NONE) {
+        if (popupState in setOf(
+                TopPopupState.BUTTON1_MAIN, TopPopupState.NEW_SKETCH, TopPopupState.EDIT_PRESET,
+                TopPopupState.SAVE_MENU, TopPopupState.SHARE_EXPORT_MAIN, TopPopupState.EXPORT_AS_MENU, TopPopupState.SHARE_AS_MENU
+            )
+        ) {
             bgPaint.color = pal.topBarActiveSlot
             canvas.drawRect(sideFrame, 0f, sideFrame + slotW, topBarH, bgPaint)
         }
@@ -431,8 +424,14 @@ class SketchWorkspaceView(
                     SketchIcons.drawTopIcon6ColorWheel(canvas, cx, cy, topBarH)
                     hitZones.add(HitZone("TOP_BTN_COLOR", slotRect))
                 }
-                6 -> SketchIcons.drawTopIcon7Layers(canvas, cx, cy, topBarH, pal.iconTint, pal.topBarBg)
-                7 -> SketchIcons.drawTopIcon8Viewfinder(canvas, cx, cy, topBarH, pal.iconTint)
+                6 -> {
+                    SketchIcons.drawTopIcon7Layers(canvas, cx, cy, topBarH, pal.iconTint, pal.topBarBg)
+                    hitZones.add(HitZone("TOP_BTN_LAYERS", slotRect))
+                }
+                7 -> {
+                    SketchIcons.drawTopIcon8Viewfinder(canvas, cx, cy, topBarH, pal.iconTint)
+                    hitZones.add(HitZone("TOP_BTN_FIT_VIEW", slotRect))
+                }
             }
         }
     }
@@ -487,7 +486,7 @@ class SketchWorkspaceView(
             MenuItem("MENU_NEW_SKETCH", "New Sketch", true),
             MenuItem("MENU_SAVE", "Save", true),
             MenuItem("MENU_IMPORT", "Import from Files", true),
-            MenuItem("MENU_PREFS", "Preferences", false),
+            MenuItem("MENU_PREFS", "Preferences", true),
             MenuItem("MENU_SHARE", "Share / Export", true)
         )
 
@@ -1136,10 +1135,9 @@ class SketchWorkspaceView(
     }
 
     // ==========================================================================
-    // TOUCH ENGINE: NON-CLOSABLE SAVING LOCK + OUTSIDE-TAP AUTO-CLOSE & DRAW
+    // TOUCH ENGINE: NON-CLOSABLE SAVING LOCK + PINNABLE LAYER DOCK + MODALS
     // ==========================================================================
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        // Block all touch input while the non-closable "Saving sketch..." modal is running!
         if (isSavingInProgress) return true
 
         val x = event.x
@@ -1148,46 +1146,102 @@ class SketchWorkspaceView(
         val topBarH = 131f * sx
         maxPointersInGesture = max(maxPointersInGesture, event.pointerCount)
 
-        // If Brush or Color Modal is open:
-        if (popupState == TopPopupState.BRUSH_MENU || popupState == TopPopupState.COLOR_MENU) {
-            val isColor = (popupState == TopPopupState.COLOR_MENU)
+        // 1. Full-Screen Preferences
+        if (popupState == TopPopupState.PREFERENCES_SCREEN) {
+            return layerController.onModalTouchEvent(event, popupState)
+        }
+
+        // 2. Layer Modals (Layer Settings, Blend Mode, Color Label, Layer Adjust)
+        if (popupState == TopPopupState.LAYER_SETTINGS_MODAL ||
+            popupState == TopPopupState.BLEND_MODE_MODAL ||
+            popupState == TopPopupState.COLOR_LABEL_MODAL ||
+            popupState == TopPopupState.LAYER_ADJUST_MODAL
+        ) {
             if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-                // If user taps OUTSIDE the modal & bottom circles, close the modal immediately and fall through to draw!
-                if (!brushAndColorModal.isTouchInsideModalOrBottomBar(x, y, width.toFloat(), height.toFloat())) {
+                if (!layerController.isTouchInsideModalOrBottomCircles(x, y, width.toFloat(), height.toFloat())) {
+                    layerController.cleanupAdjustBackup(commit = true)
                     popupState = TopPopupState.NONE
-                    brushAndColorModal.subOverlay = BrushSubOverlay.NONE
+                    // If user also tapped outside the Layer Dock while unpinned, close the Layer Dock too!
+                    if (layerController.isLayerDockOpen && !layerController.isLayerDockPinned && !layerController.isTouchInsideLayerDock(x, y) && y > topBarH) {
+                        layerController.isLayerDockOpen = false
+                    }
                     invalidate()
-                    // Fall through so drawing or top-bar click happens immediately without blocking!
+                    // Fall through so drawing or dock/topbar tap executes immediately!
                 } else {
-                    return brushAndColorModal.onTouchEvent(event, width.toFloat(), height.toFloat(), isColor)
+                    return layerController.onModalTouchEvent(event, popupState)
                 }
             } else {
-                return brushAndColorModal.onTouchEvent(event, width.toFloat(), height.toFloat(), isColor)
+                return layerController.onModalTouchEvent(event, popupState)
             }
         }
 
-        // If any other popup is open and user touches outside both the popup AND the top bar on ACTION_DOWN:
-        // Close the popup immediately and fall through so canvas drawing or 2-finger zoom starts right away!
+        // 3. Brush / Color / Background Color Modals
+        if (popupState == TopPopupState.BRUSH_MENU ||
+            popupState == TopPopupState.COLOR_MENU ||
+            popupState == TopPopupState.BG_COLOR_MENU
+        ) {
+            val isBgCol = (popupState == TopPopupState.BG_COLOR_MENU)
+            val isColor = (popupState == TopPopupState.COLOR_MENU || isBgCol)
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                if (!brushAndColorModal.isTouchInsideModalOrBottomBar(x, y, width.toFloat(), height.toFloat())) {
+                    popupState = TopPopupState.NONE
+                    brushAndColorModal.subOverlay = BrushSubOverlay.NONE
+                    if (layerController.isLayerDockOpen && !layerController.isLayerDockPinned && !layerController.isTouchInsideLayerDock(x, y) && y > topBarH) {
+                        layerController.isLayerDockOpen = false
+                    }
+                    invalidate()
+                    // Fall through to canvas drawing or dock/topbar interaction!
+                } else {
+                    return brushAndColorModal.onTouchEvent(event, width.toFloat(), height.toFloat(), isColor, isBgCol)
+                }
+            } else {
+                return brushAndColorModal.onTouchEvent(event, width.toFloat(), height.toFloat(), isColor, isBgCol)
+            }
+        }
+
+        // 4. Right-Side Layer Dock Touch Handling & Unpinned Auto-Close
+        if (layerController.isLayerDockOpen && popupState == TopPopupState.NONE) {
+            if (layerController.isTouchInsideLayerDock(x, y)) {
+                return layerController.onDockTouchEvent(event)
+            } else if (event.actionMasked == MotionEvent.ACTION_DOWN && !layerController.isLayerDockPinned) {
+                // Tapping or drawing anywhere outside the unpinned Layer Dock closes it immediately!
+                val topHit = findHitZone(x, y)
+                if (topHit?.id != "TOP_BTN_LAYERS") {
+                    layerController.isLayerDockOpen = false
+                    invalidate()
+                }
+                // Fall through so canvas stroke or top bar tap happens in this exact touch event!
+            }
+        }
+
+        // 5. Top Menu Bar Popups Outside-Tap Auto-Close
         if (event.actionMasked == MotionEvent.ACTION_DOWN && popupState != TopPopupState.NONE) {
             if (!currentPopupBounds.contains(x, y) && y > topBarH) {
                 closeInlineEditor()
                 popupState = TopPopupState.NONE
                 invalidate()
-                // Fall through so drawing starts immediately on this exact touch!
             }
         }
 
-        // On-Canvas Eyedropper Sampling
+        // 6. On-Canvas Eyedropper Sampling (Samples Composite Canvas)
         if (isCanvasEyedropperActive && popupState == TopPopupState.NONE && y > topBarH) {
             if (event.actionMasked == MotionEvent.ACTION_DOWN || event.actionMasked == MotionEvent.ACTION_MOVE) {
                 val cPt = screenToCanvasPoint(x, y)
-                val bmp = project.ensureCanvasBitmap()
-                val px = cPt.x.toInt().coerceIn(0, bmp.width - 1)
-                val py = cPt.y.toInt().coerceIn(0, bmp.height - 1)
-                val sampled = bmp.getPixel(px, py)
-                val finalCol = if (Color.alpha(sampled) < 20) uiPalette.paperTint else sampled
-                brushAndColorModal.colorState.setFromColorInt(finalCol, recordPrevious = true)
-                brushAndColorModal.colorState.pushToHistory(finalCol)
+                val compBmp = LayerStudioCompositor.renderProjectComposite(project, forExport = false)
+                val px = cPt.x.toInt().coerceIn(0, compBmp.width - 1)
+                val py = cPt.y.toInt().coerceIn(0, compBmp.height - 1)
+                val sampled = compBmp.getPixel(px, py)
+                val finalCol = if (Color.alpha(sampled) < 20) project.backgroundColor else sampled
+                if (eyedropperForBackground) {
+                    brushAndColorModal.bgColorState.setFromColorInt(finalCol, recordPrevious = true)
+                    brushAndColorModal.bgColorState.pushToHistory(finalCol)
+                    project.backgroundColor = brushAndColorModal.bgColorState.currentColor
+                    project.backgroundVisible = true
+                    project.isDirty = true
+                } else {
+                    brushAndColorModal.colorState.setFromColorInt(finalCol, recordPrevious = true)
+                    brushAndColorModal.colorState.pushToHistory(finalCol)
+                }
                 if (event.actionMasked == MotionEvent.ACTION_UP) {
                     isCanvasEyedropperActive = false
                 }
@@ -1200,7 +1254,7 @@ class SketchWorkspaceView(
             return true
         }
 
-        // 2-Finger Pinch Zoom, Pan & Rotation
+        // 7. 2-Finger Pinch Zoom, Pan & Rotation
         if (event.pointerCount >= 2 && popupState == TopPopupState.NONE) {
             abortPresetLongPress()
             pendingStrokeSamples.clear()
@@ -1267,6 +1321,15 @@ class SketchWorkspaceView(
 
                 if (popupState == TopPopupState.NONE && y > topBarH) {
                     closeInlineEditor()
+                    val activeLayer = project.activeLayer()
+                    if (activeLayer.locked) {
+                        showBanner("'${activeLayer.name}' is locked")
+                        return true
+                    }
+                    if (!activeLayer.visible) {
+                        showBanner("'${activeLayer.name}' is hidden")
+                        return true
+                    }
                     val cPt = screenToCanvasPoint(x, y)
                     val bmp = project.ensureCanvasBitmap()
                     isDrawingStroke = true
@@ -1280,7 +1343,7 @@ class SketchWorkspaceView(
                         val sxInt = cPt.x.toInt().coerceIn(0, bmp.width - 1)
                         val syInt = cPt.y.toInt().coerceIn(0, bmp.height - 1)
                         val under = bmp.getPixel(sxInt, syInt)
-                        smudgeCarryColor = if (Color.alpha(under) < 15) uiPalette.paperTint else under
+                        smudgeCarryColor = if (Color.alpha(under) < 15) project.backgroundColor else under
                         pendingStrokeSamples.add(QueuedStrokeSample(PointF(cPt.x, cPt.y), event.pressure))
                     }
                     return true
@@ -1314,14 +1377,17 @@ class SketchWorkspaceView(
                 lastTouchY = y
 
                 if (!isDrawingStroke && popupState == TopPopupState.NONE && maxPointersInGesture == 1 && y > topBarH) {
-                    closeInlineEditor()
-                    val startPt = screenToCanvasPoint(x, y)
-                    isDrawingStroke = true
-                    smoothX = startPt.x
-                    smoothY = startPt.y
-                    lastCanvasPt.set(startPt.x, startPt.y)
-                    prevCanvasPt.set(startPt.x, startPt.y)
-                    lastStrokeSpeed = 0f
+                    val activeLayer = project.activeLayer()
+                    if (!activeLayer.locked && activeLayer.visible) {
+                        closeInlineEditor()
+                        val startPt = screenToCanvasPoint(x, y)
+                        isDrawingStroke = true
+                        smoothX = startPt.x
+                        smoothY = startPt.y
+                        lastCanvasPt.set(startPt.x, startPt.y)
+                        prevCanvasPt.set(startPt.x, startPt.y)
+                        lastStrokeSpeed = 0f
+                    }
                 }
 
                 if (isDrawingStroke && maxPointersInGesture == 1) {
@@ -1340,7 +1406,7 @@ class SketchWorkspaceView(
                         val sxInt = rawPt.x.toInt().coerceIn(0, bmp.width - 1)
                         val syInt = rawPt.y.toInt().coerceIn(0, bmp.height - 1)
                         val under = bmp.getPixel(sxInt, syInt)
-                        smudgeCarryColor = if (Color.alpha(under) < 15) uiPalette.paperTint else under
+                        smudgeCarryColor = if (Color.alpha(under) < 15) project.backgroundColor else under
                         smoothX = rawPt.x
                         smoothY = rawPt.y
                         pendingStrokeSamples.add(QueuedStrokeSample(PointF(lastCanvasPt.x, lastCanvasPt.y), event.pressure))
@@ -1361,6 +1427,7 @@ class SketchWorkspaceView(
                     }
 
                     stampSelectedBrushSegment(prevCanvasPt, lastCanvasPt, curPt, event.pressure)
+                    project.markActiveLayerDirty()
                     prevCanvasPt.set(lastCanvasPt)
                     lastCanvasPt.set(curPt)
                     invalidate()
@@ -1401,6 +1468,7 @@ class SketchWorkspaceView(
                     if (maxPointersInGesture == 1 && !strokeCommittedToBitmap && pendingStrokeSamples.isNotEmpty()) {
                         commitPendingStrokeSamples()
                     }
+                    project.markActiveLayerDirty()
                     pendingStrokeSamples.clear()
                     isDrawingStroke = false
                     strokeCommittedToBitmap = false
@@ -1444,7 +1512,7 @@ class SketchWorkspaceView(
         if (strokeCommittedToBitmap || pendingStrokeSamples.isEmpty()) return
         strokeCommittedToBitmap = true
         project.pushUndoSnapshot()
-        project.isDirty = true
+        project.markActiveLayerDirty()
         if (!brushAndColorModal.colorState.isColorlessEraser) {
             brushAndColorModal.colorState.pushToHistory(brushAndColorModal.colorState.currentColor)
         }
@@ -1486,14 +1554,12 @@ class SketchWorkspaceView(
         return PointF(pts[0], pts[1])
     }
 
-    /**
-     * Multi-Type SOTA Brush Dab Renderer supporting Standard, Marker, Smudge, Glow & Eraser,
-     * plus Basic (Size, Opacity) and Advanced (Pressure, Stamp, Nib, Randomness) parameters.
-     */
     private var strokeCarryDist: Float = 0f
     private var dabCounter: Int = 0
 
     private fun stampSelectedBrushSegment(p0: PointF, p1: PointF, p2: PointF, rawPressure: Float) {
+        val activeLayer = project.activeLayer()
+        if (activeLayer.locked || !activeLayer.visible) return
         val bmp = project.ensureCanvasBitmap()
         val c = Canvas(bmp)
         val brush = brushAndColorModal.selectedBrush()
@@ -1533,7 +1599,8 @@ class SketchWorkspaceView(
                 deterministicRandom = false,
                 procHistory = procHistoryPts,
                 smudgeBitmap = bmp,
-                smudgeCarryColorHolder = smudgeHolder
+                smudgeCarryColorHolder = smudgeHolder,
+                alphaLock = activeLayer.alphaLock
             )
             smudgeCarryColor = smudgeHolder[0]
             strokeCarryDist = 0.001f
@@ -1562,7 +1629,8 @@ class SketchWorkspaceView(
                     deterministicRandom = false,
                     procHistory = procHistoryPts,
                     smudgeBitmap = bmp,
-                    smudgeCarryColorHolder = smudgeHolder
+                    smudgeCarryColorHolder = smudgeHolder,
+                    alphaLock = activeLayer.alphaLock
                 )
                 smudgeCarryColor = smudgeHolder[0]
                 traveled += stepSpacingPx
@@ -1611,41 +1679,42 @@ class SketchWorkspaceView(
                 popupState = if (popupState == TopPopupState.BUTTON1_MAIN) TopPopupState.NONE else TopPopupState.BUTTON1_MAIN
                 invalidate()
             }
-
             "TOP_BTN_UNDO" -> {
                 if (project.undo()) invalidate()
             }
-
             "TOP_BTN_REDO" -> {
                 if (project.redo()) invalidate()
             }
-
             "TOP_BTN_BRUSH" -> {
                 popupState = if (popupState == TopPopupState.BRUSH_MENU) TopPopupState.NONE else TopPopupState.BRUSH_MENU
                 invalidate()
             }
-
             "TOP_BTN_COLOR" -> {
                 popupState = if (popupState == TopPopupState.COLOR_MENU) TopPopupState.NONE else TopPopupState.COLOR_MENU
                 invalidate()
             }
-
+            "TOP_BTN_LAYERS" -> {
+                popupState = TopPopupState.NONE
+                layerController.isLayerDockOpen = !layerController.isLayerDockOpen
+                invalidate()
+            }
+            "TOP_BTN_FIT_VIEW" -> {
+                resetCanvasTransform()
+                showBanner("Fit to View")
+            }
             "BACK_TO_MAIN" -> {
                 popupState = TopPopupState.BUTTON1_MAIN
                 invalidate()
             }
-
             "BACK_TO_PRESET_LIST" -> {
                 popupState = TopPopupState.NEW_SKETCH
                 newSketchTab = NewSketchTab.LIST_PRESETS
                 invalidate()
             }
-
             "BACK_TO_SHARE_MAIN" -> {
                 popupState = TopPopupState.SHARE_EXPORT_MAIN
                 invalidate()
             }
-
             "EDIT_PROJECT_NAME" -> {
                 activeInlineField = InlineEditField.PROJECT_NAME_BOX
                 callbacks.onBeginInlineEdit(
@@ -1660,7 +1729,6 @@ class SketchWorkspaceView(
                 )
                 invalidate()
             }
-
             "INPUT_WIDTH_BOX" -> {
                 activeInlineField = InlineEditField.WIDTH_BOX
                 callbacks.onBeginInlineEdit(
@@ -1675,7 +1743,6 @@ class SketchWorkspaceView(
                 )
                 invalidate()
             }
-
             "INPUT_HEIGHT_BOX" -> {
                 activeInlineField = InlineEditField.HEIGHT_BOX
                 callbacks.onBeginInlineEdit(
@@ -1690,7 +1757,6 @@ class SketchWorkspaceView(
                 )
                 invalidate()
             }
-
             "EDIT_PRESET_NAME_FIELD" -> {
                 activeInlineField = InlineEditField.PRESET_NAME_BOX
                 callbacks.onBeginInlineEdit(
@@ -1705,7 +1771,6 @@ class SketchWorkspaceView(
                 )
                 invalidate()
             }
-
             "MENU_NEW_SKETCH" -> {
                 popupState = TopPopupState.NEW_SKETCH
                 val last = ProjectStorageManager.loadLastDimensions(context, hwScreenSize.first, hwScreenSize.second)
@@ -1714,12 +1779,10 @@ class SketchWorkspaceView(
                 lockedAspectRatio = customWidthInput.toDouble() / max(1, customHeightInput).toDouble()
                 invalidate()
             }
-
             "MENU_SAVE" -> {
                 popupState = TopPopupState.SAVE_MENU
                 invalidate()
             }
-
             "MENU_IMPORT" -> {
                 popupState = TopPopupState.NONE
                 invalidate()
@@ -1727,22 +1790,22 @@ class SketchWorkspaceView(
                     callbacks.onRequestImportImage()
                 }
             }
-
+            "MENU_PREFS" -> {
+                popupState = TopPopupState.PREFERENCES_SCREEN
+                invalidate()
+            }
             "MENU_SHARE" -> {
                 popupState = TopPopupState.SHARE_EXPORT_MAIN
                 invalidate()
             }
-
             "TAB_PLUS" -> {
                 newSketchTab = NewSketchTab.PLUS_CUSTOM
                 invalidate()
             }
-
             "TAB_LIST" -> {
                 newSketchTab = NewSketchTab.LIST_PRESETS
                 invalidate()
             }
-
             "ROTATE_CANVAS_PREVIEW" -> {
                 val tmp = customWidthInput
                 customWidthInput = customHeightInput
@@ -1752,7 +1815,6 @@ class SketchWorkspaceView(
                 }
                 invalidate()
             }
-
             "TOGGLE_RATIO_LOCK" -> {
                 isRatioLocked = !isRatioLocked
                 if (isRatioLocked && customWidthInput > 0 && customHeightInput > 0) {
@@ -1760,7 +1822,6 @@ class SketchWorkspaceView(
                 }
                 invalidate()
             }
-
             "BTN_CREATE_CUSTOM" -> {
                 if (customWidthInput > 0 && customHeightInput > 0) {
                     val targetW = customWidthInput
@@ -1769,16 +1830,13 @@ class SketchWorkspaceView(
                     requestCreateNewProject(targetW, targetH)
                 }
             }
-
             "PRESET_SCREEN" -> {
                 requestCreateNewProject(hwScreenSize.first, hwScreenSize.second)
             }
-
             "PRESET_LAST" -> {
                 val last = ProjectStorageManager.loadLastDimensions(context, hwScreenSize.first, hwScreenSize.second)
                 requestCreateNewProject(last.first, last.second)
             }
-
             "PRESET_SELECT" -> {
                 val idx = zone.payload
                 if (idx in customPresets.indices) {
@@ -1787,7 +1845,6 @@ class SketchWorkspaceView(
                     requestCreateNewProject(p.width, p.height)
                 }
             }
-
             "PRESET_GEAR" -> {
                 val idx = zone.payload
                 if (idx in customPresets.indices) {
@@ -1802,7 +1859,6 @@ class SketchWorkspaceView(
                     invalidate()
                 }
             }
-
             "BTN_ADD_PRESET" -> {
                 editingPresetIndex = -1
                 editingPresetName = "Custom ${customPresets.size + 1}"
@@ -1813,7 +1869,6 @@ class SketchWorkspaceView(
                 popupState = TopPopupState.EDIT_PRESET
                 invalidate()
             }
-
             "BTN_DELETE_PRESET" -> {
                 if (editingPresetIndex in customPresets.indices) {
                     customPresets.removeAt(editingPresetIndex)
@@ -1823,7 +1878,6 @@ class SketchWorkspaceView(
                     invalidate()
                 }
             }
-
             "BTN_DONE_EDIT_PRESET" -> {
                 if (customWidthInput > 0 && customHeightInput > 0) {
                     if (editingPresetIndex in customPresets.indices) {
@@ -1847,37 +1901,19 @@ class SketchWorkspaceView(
                     invalidate()
                 }
             }
-
-            "ACTION_SAVE_CURRENT" -> {
-                performAsyncSave(asCopy = false, onAfterSave = null)
-            }
-
-            "ACTION_SAVE_COPY" -> {
-                performAsyncSave(asCopy = true, onAfterSave = null)
-            }
-
-            "EXPORT_FMT_PNG", "EXPORT_FMT_PSD", "EXPORT_FMT_PDF" -> {
-                performAsyncStaticFormatExport("PNG")
-            }
-
-            "EXPORT_FMT_JPG" -> {
-                performAsyncStaticFormatExport("JPG")
-            }
-
-            "EXPORT_FMT_TIF" -> {
-                performAsyncStaticFormatExport("TIF")
-            }
-
+            "ACTION_SAVE_CURRENT" -> performAsyncSave(asCopy = false, onAfterSave = null)
+            "ACTION_SAVE_COPY" -> performAsyncSave(asCopy = true, onAfterSave = null)
+            "EXPORT_FMT_PNG", "EXPORT_FMT_PSD", "EXPORT_FMT_PDF" -> performAsyncStaticFormatExport("PNG")
+            "EXPORT_FMT_JPG" -> performAsyncStaticFormatExport("JPG")
+            "EXPORT_FMT_TIF" -> performAsyncStaticFormatExport("TIF")
             "OPEN_EXPORT_AS" -> {
                 popupState = TopPopupState.EXPORT_AS_MENU
                 invalidate()
             }
-
             "OPEN_SHARE_AS" -> {
                 popupState = TopPopupState.SHARE_AS_MENU
                 invalidate()
             }
-
         }
     }
 
@@ -1893,11 +1929,22 @@ class SketchWorkspaceView(
                 isDirty = false,
                 isSavedOnce = false
             )
-            project.ensureCanvasBitmap()
+            project.ensureLayersInitialized()
             resetCanvasTransform()
             showBanner("New Sketch (${project.name}): ${targetW} × ${targetH}")
             invalidate()
         }
+    }
+
+    fun applyLoadedMultiLayerProject(loaded: SketchProjectState) {
+        project.releaseAll()
+        project = loaded
+        project.ensureLayersInitialized()
+        brushAndColorModal.syncBgColorFromProject(project.backgroundColor)
+        resetCanvasTransform()
+        ProjectStorageManager.saveLastDimensions(context, project.width, project.height)
+        showBanner("Opened '${project.name}' (${project.layers.size} layer${if (project.layers.size == 1) "" else "s"})")
+        invalidate()
     }
 
     fun applyImportedBitmapAsNewProject(bmp: android.graphics.Bitmap, suggestedName: String) {
@@ -1909,10 +1956,12 @@ class SketchWorkspaceView(
             isDirty = true,
             isSavedOnce = false
         )
+        project.ensureLayersInitialized()
         val layerBmp = project.ensureCanvasBitmap()
         val c = Canvas(layerBmp)
         c.drawBitmap(bmp, null, RectF(0f, 0f, layerBmp.width.toFloat(), layerBmp.height.toFloat()), null)
         bmp.recycle()
+        project.markActiveLayerDirty()
         resetCanvasTransform()
         ProjectStorageManager.saveLastDimensions(context, project.width, project.height)
         showBanner("Imported Project: ${project.width} × ${project.height}")
@@ -1961,9 +2010,7 @@ class SketchWorkspaceView(
         }
 
         val cancelBtn = makeSharpBtn("CANCEL", Color.rgb(220, 220, 220), Color.rgb(40, 40, 40)) {}
-        val discardBtn = makeSharpBtn("DISCARD", Color.rgb(215, 75, 75), Color.WHITE) {
-            onProceed()
-        }
+        val discardBtn = makeSharpBtn("DISCARD", Color.rgb(215, 75, 75), Color.WHITE) { onProceed() }
         val saveBtn = makeSharpBtn("SAVE", Color.rgb(55, 116, 205), Color.WHITE) {
             performAsyncSave(asCopy = false, onAfterSave = onProceed)
         }
@@ -1980,28 +2027,23 @@ class SketchWorkspaceView(
         dialog.show()
     }
 
-    /**
-     * Background Thread Saver with Multi-Click Guard & Non-Closable Saving Modal.
-     */
     private fun performAsyncSave(asCopy: Boolean, onAfterSave: (() -> Unit)?) {
         if (isSavingInProgress) return
         closeInlineEditor()
         savingModalTitle = "Saving sketch..."
-        savingModalSubtitle = "${project.width} × ${project.height} px (PNG + TIFF)"
+        savingModalSubtitle = "${project.width} × ${project.height} px (${project.layers.size}L PNG + TIFF)"
         savingProgressFraction = -1f
         isSavingInProgress = true
         popupState = TopPopupState.NONE
         invalidate()
 
-        val paperTint = uiPalette.paperTint
         val appCtx = context.applicationContext
 
         Thread {
             val res = ProjectStorageManager.saveProjectToDevice(
                 context = appCtx,
                 project = project,
-                asCopy = asCopy,
-                paperColor = paperTint
+                asCopy = asCopy
             )
             post {
                 isSavingInProgress = false
@@ -2030,15 +2072,13 @@ class SketchWorkspaceView(
         popupState = TopPopupState.NONE
         invalidate()
 
-        val paperTint = uiPalette.paperTint
         val appCtx = context.applicationContext
 
         Thread {
             val res = ProjectStorageManager.exportStaticFormatToDevice(
                 context = appCtx,
                 project = project,
-                formatCode = formatCode,
-                paperColor = paperTint
+                formatCode = formatCode
             )
             post {
                 isSavingInProgress = false
@@ -2111,9 +2151,6 @@ class SketchWorkspaceView(
         dlg.show()
     }
 
-    /**
-     * Requires user to type "confirm" to delete a Brush Set, as specified.
-     */
     fun showConfirmDeleteSetModal(setName: String, onConfirmed: () -> Unit) {
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL

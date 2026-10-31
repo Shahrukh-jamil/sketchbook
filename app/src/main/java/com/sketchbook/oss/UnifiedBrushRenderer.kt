@@ -8,12 +8,9 @@ import android.graphics.PointF
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
 import android.graphics.RadialGradient
-import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Shader
 import kotlin.math.cos
-import kotlin.math.hypot
-import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.random.Random
@@ -26,16 +23,9 @@ object UnifiedBrushRenderer {
         strokeJoin = Paint.Join.ROUND
     }
 
-    private val strokeLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeCap = Paint.Cap.ROUND
-        strokeJoin = Paint.Join.ROUND
-    }
-
     private val dstOutXfer = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
-    private val clearXfer = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
+    private val srcAtopXfer = PorterDuffXfermode(PorterDuff.Mode.SRC_ATOP)
     private val reusableOvalRect = RectF()
-    private val reusableHsl = FloatArray(3)
 
     fun renderSingleDab(
         canvas: Canvas,
@@ -50,7 +40,8 @@ object UnifiedBrushRenderer {
         deterministicRandom: Boolean,
         procHistory: MutableList<PointF>?,
         smudgeBitmap: Bitmap?,
-        smudgeCarryColorHolder: IntArray?
+        smudgeCarryColorHolder: IntArray?,
+        alphaLock: Boolean = false
     ) {
         val pClamped = pressureNorm.coerceIn(0.05f, 1.0f)
         val sizePressScale = (brush.sizeLightPressure + (brush.sizeHeavyPressure - brush.sizeLightPressure) * pClamped) / 100f
@@ -98,7 +89,13 @@ object UnifiedBrushRenderer {
         val effectiveAlpha = (dabAlpha * flowScale).roundToInt().coerceIn(2, 255)
 
         val isEraseMode = (brush.brushType == SketchBrushType.ERASER || isTransparentColor)
-        val activeXfer = if (isEraseMode) dstOutXfer else null
+        // If alphaLock is ON and we are erasing, erasing shouldn't reduce alpha; if painting, SRC_ATOP preserves existing layer alpha!
+        if (alphaLock && isEraseMode) return
+        val activeXfer = when {
+            isEraseMode -> dstOutXfer
+            alphaLock -> srcAtopXfer
+            else -> null
+        }
 
         val cr = if (isEraseMode) 0 else Color.red(baseColor)
         val cg = if (isEraseMode) 0 else Color.green(baseColor)
@@ -192,7 +189,7 @@ object UnifiedBrushRenderer {
                     canvas.drawCircle(0f, 0f, rad, dabPaint)
                 }
 
-                if (brush.grainStrength > 5f && rad >= 3f) {
+                if (brush.grainStrength > 5f && rad >= 3f && !alphaLock) {
                     val grainFactor = (brush.grainStrength / 100f).coerceIn(0.05f, 1f)
                     dabPaint.shader = null
                     dabPaint.xfermode = dstOutXfer
@@ -224,5 +221,4 @@ object UnifiedBrushRenderer {
         canvas.drawOval(reusableOvalRect, dabPaint)
         canvas.restore()
     }
-
 }

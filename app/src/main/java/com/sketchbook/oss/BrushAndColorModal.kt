@@ -3,12 +3,10 @@ package com.sketchbook.oss
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.ComposeShader
 import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PointF
-import android.graphics.PorterDuff
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.SweepGradient
@@ -28,21 +26,24 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
     var selectedSetIndex: Int = 0
     var selectedBrushIndex: Int = 14 // "Duplicate" in Basic set by default
     val colorState = ColorStudioState()
+    val bgColorState = ColorStudioState().apply {
+        setFromColorInt(Color.WHITE, recordPrevious = false)
+    }
 
     var brushTopTab: BrushModalTopTab = BrushModalTopTab.LIBRARY_GRID
     var settingsSubTab: BrushSettingsSubTab = BrushSettingsSubTab.BASIC
     var subOverlay: BrushSubOverlay = BrushSubOverlay.NONE
-    var expandedAdvancedSection: Int = -1 // -1 = none, 0 = Pressure, 1 = Stamp, 2 = Nib, 3 = Randomness
+    var expandedAdvancedSection: Int = -1
 
     var libraryScrollY: Float = 0f
     var advancedScrollY: Float = 0f
 
-    // Touch / Drag tracking inside modal
     private var draggingSliderId: String? = null
     private var isDraggingHueRing: Boolean = false
     private var isDraggingSlDiamond: Boolean = false
     private var isScrollingLibrary: Boolean = false
     private var isScrollingAdvanced: Boolean = false
+    private var activeBgModeInTouch: Boolean = false
     private var downX: Float = 0f
     private var downY: Float = 0f
     private var lastY: Float = 0f
@@ -51,7 +52,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
     private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val subTextPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val previewPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
 
     data class ModalHit(val id: String, val rect: RectF, val arg1: Int = -1, val arg2: Int = -1)
     private val hits = mutableListOf<ModalHit>()
@@ -67,7 +67,10 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
     private var wheelInnerR = 220f
     private var diamondHalfDiag = 192f
 
-    
+    fun syncBgColorFromProject(c: Int) {
+        bgColorState.setFromColorInt(c, recordPrevious = false)
+    }
+
     fun selectedSet(): SketchBrushSet {
         if (brushSets.isEmpty()) brushSets.addAll(DefaultBrushCatalog.createDefaultSets())
         selectedSetIndex = selectedSetIndex.coerceIn(0, brushSets.lastIndex)
@@ -86,40 +89,360 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
     fun isTouchInsideModalOrBottomBar(x: Float, y: Float, viewW: Float, viewH: Float): Boolean {
         val sx = viewW / 1080f
         if (outerCardRect.contains(x, y)) return true
-        // Check bottom 3 floating circular buttons area
         if (y >= viewH - 220f * sx && x in (190f * sx)..(890f * sx)) return true
         return false
     }
 
-    // ==========================================================================
-    // MAIN MODAL RENDER DISPATCHER
-    // ==========================================================================
-    fun draw(canvas: Canvas, viewW: Float, viewH: Float, isColorMode: Boolean) {
+    fun draw(canvas: Canvas, viewW: Float, viewH: Float, isColorMode: Boolean, isBgColorMode: Boolean = false) {
         hits.clear()
         sliderRects.clear()
 
         val sx = viewW / 1080f
         val sy = viewH / 2408f
 
-        // Outer White Sheet Frame matching 115925.jpg (x=23..1057, y=75..viewH)
         val innerLeft = 124f * sx
         val innerRight = viewW - 124f * sx
         val innerTop = 124f * sy
         val innerBottom = viewH - 224f * sy
         outerCardRect.set(innerLeft, innerTop, innerRight, innerBottom)
 
-        if (isColorMode) {
-            drawColorModalContent(canvas, innerLeft, innerTop, innerRight, innerBottom, sx, sy)
-        } else {
-            drawBrushModalContent(canvas, innerLeft, innerTop, innerRight, innerBottom, sx, sy)
+        when {
+            isBgColorMode -> drawBgColorAndStudioModalContent(canvas, innerLeft, innerTop, innerRight, innerBottom, sx, sy)
+            isColorMode -> drawColorModalContent(canvas, innerLeft, innerTop, innerRight, innerBottom, sx, sy, bgMode = false)
+            else -> drawBrushModalContent(canvas, innerLeft, innerTop, innerRight, innerBottom, sx, sy)
         }
 
-        // Draw Bottom 3 Circular Navigation Buttons (Color Wheel | X Close | Brush Studio)
-        drawBottomThreeCircles(canvas, viewW, viewH, sx, sy, isColorMode)
+        drawBottomThreeCircles(canvas, viewW, viewH, sx, sy, isColorMode || isBgColorMode)
     }
 
     // ==========================================================================
-    // 1-TO-1 BRUSH MODAL (Library Grid, Pinned Preview, Set Settings, Brush Settings)
+    // 2-TAB LIVE BACKGROUND COLOR & BACKGROUND STUDIO MODAL (Screenshot 164119.jpg)
+    // ==========================================================================
+    private fun drawBgColorAndStudioModalContent(
+        canvas: Canvas,
+        left: Float,
+        top: Float,
+        right: Float,
+        bottom: Float,
+        sx: Float,
+        sy: Float
+    ) {
+        val panelW = right - left
+        val topTabH = 132f * sy
+        val midX = left + panelW * 0.5f
+
+        // ONLY 2 TOP SUBMENUS:
+        // Tab 0 (Left): Live Background Color Wheel (164119.jpg)
+        // Tab 1 (Right): Live Background Studio (Textures, Grids & Lighting)
+        val tab0Rect = RectF(left, top, midX, top + topTabH)
+        val tab1Rect = RectF(midX, top, right, top + topTabH)
+
+        val activeTab = bgColorState.topTabIndex.coerceIn(0, 1)
+        fillPaint.color = if (activeTab == 0) Color.rgb(20, 120, 216) else Color.rgb(142, 142, 142)
+        canvas.drawRect(tab0Rect, fillPaint)
+
+        fillPaint.color = if (activeTab == 1) Color.rgb(20, 120, 216) else Color.rgb(142, 142, 142)
+        canvas.drawRect(tab1Rect, fillPaint)
+
+        SketchIcons.drawTopIcon6ColorWheel(canvas, tab0Rect.centerX(), tab0Rect.centerY(), topTabH * 0.95f)
+        drawBgStudioTopIcon(canvas, tab1Rect.centerX(), tab1Rect.centerY(), 54f * sx)
+
+        hits.add(ModalHit("BG_TOP_TAB", tab0Rect, 0))
+        hits.add(ModalHit("BG_TOP_TAB", tab1Rect, 1))
+
+        if (activeTab == 0) {
+            drawColorWheelBody(canvas, left, top + topTabH, right, bottom, sx, sy, state = bgColorState, isBgMode = true)
+        } else {
+            drawLiveBackgroundStudioBody(canvas, left, top + topTabH, right, bottom, sx, sy)
+        }
+    }
+
+    private fun drawLiveBackgroundStudioBody(
+        canvas: Canvas,
+        left: Float,
+        bodyTop: Float,
+        right: Float,
+        bottom: Float,
+        sx: Float,
+        sy: Float
+    ) {
+        val panelW = right - left
+        val cfg = hostView.project.backgroundConfig
+        fillPaint.color = Color.rgb(48, 48, 50)
+        canvas.drawRect(left, bodyTop, right, bottom, fillPaint)
+
+        // 1. Live Mini Preview Banner at Top of Background Studio (y = bodyTop .. bodyTop + 168)
+        val prevH = 168f * sy
+        val prevRect = RectF(left + 28f * sx, bodyTop + 20f * sy, right - 28f * sx, bodyTop + prevH)
+        canvas.save()
+        canvas.clipRect(prevRect)
+        canvas.translate(prevRect.left, prevRect.top)
+        LayerStudioCompositor.drawBackgroundToCanvas(
+            targetCanvas = canvas,
+            project = hostView.project,
+            w = prevRect.width().roundToInt().coerceAtLeast(1),
+            h = prevRect.height().roundToInt().coerceAtLeast(1),
+            forExport = false
+        )
+        canvas.restore()
+        strokePaint.color = Color.rgb(95, 95, 100)
+        strokePaint.strokeWidth = 2.5f * sx
+        canvas.drawRect(prevRect, strokePaint)
+
+        // 2. 3 Sub-Tabs: SURFACE | GRIDS | LIGHTING
+        val subTabTop = prevRect.bottom + 20f * sy
+        val subTabH = 112f * sy
+        val subTabBot = subTabTop + subTabH
+        fillPaint.color = Color.rgb(39, 39, 41)
+        canvas.drawRect(left, subTabTop, right, subTabBot, fillPaint)
+
+        val slotW = panelW / 3f
+        val titles = arrayOf("SURFACE", "GRIDS", "LIGHTING")
+        for (i in 0..2) {
+            val sLeft = left + i * slotW
+            val sRect = RectF(sLeft, subTabTop, sLeft + slotW, subTabBot)
+            textPaint.color = if (cfg.studioSubTab == i) Color.rgb(65, 148, 238) else Color.rgb(125, 125, 130)
+            textPaint.textSize = 33f * sx
+            textPaint.isFakeBoldText = (cfg.studioSubTab == i)
+            textPaint.textAlign = Paint.Align.CENTER
+            canvas.drawText(titles[i], sRect.centerX(), subTabTop + 68f * sy, textPaint)
+            textPaint.isFakeBoldText = false
+            if (i < 2) {
+                strokePaint.color = Color.rgb(30, 30, 32)
+                strokePaint.strokeWidth = 2f
+                canvas.drawLine(sRect.right, subTabTop + 18f * sy, sRect.right, subTabBot - 18f * sy, strokePaint)
+            }
+            hits.add(ModalHit("BG_STUDIO_SUBTAB", sRect, i))
+        }
+
+        // 3. Preset Cards Grid + Live Sliders
+        var curY = subTabBot + 28f * sy
+        val padX = 32f * sx
+        val cols = 3
+        val gap = 18f * sx
+        val cardW = (panelW - padX * 2f - gap * (cols - 1)) / cols
+        val cardH = 142f * sy
+
+        when (cfg.studioSubTab) {
+            0 -> { // SURFACE (Paper & Canvas Textures)
+                val surfNames = arrayOf("Smooth", "Cold Press", "Canvas", "Charcoal", "Halftone", "Parchment")
+                for (i in 0..5) {
+                    val r = i / 3
+                    val c = i % 3
+                    val cx = left + padX + c * (cardW + gap)
+                    val cy = curY + r * (cardH + gap)
+                    val cRect = RectF(cx, cy, cx + cardW, cy + cardH)
+                    val isSel = (cfg.surfacePreset == i)
+
+                    fillPaint.color = if (isSel) Color.rgb(62, 74, 92) else Color.rgb(38, 38, 40)
+                    canvas.drawRoundRect(cRect, 12f * sx, 12f * sx, fillPaint)
+                    strokePaint.color = if (isSel) Color.rgb(65, 148, 238) else Color.rgb(72, 72, 76)
+                    strokePaint.strokeWidth = if (isSel) 4.2f * sx else 2f * sx
+                    canvas.drawRoundRect(cRect, 12f * sx, 12f * sx, strokePaint)
+
+                    drawSurfacePresetVectorIcon(canvas, cRect.centerX(), cRect.top + 52f * sy, 36f * sx, i, isSel)
+
+                    subTextPaint.color = if (isSel) Color.WHITE else Color.rgb(185, 185, 190)
+                    subTextPaint.textSize = 24f * sx
+                    subTextPaint.textAlign = Paint.Align.CENTER
+                    canvas.drawText(surfNames[i], cRect.centerX(), cRect.bottom - 20f * sy, subTextPaint)
+                    hits.add(ModalHit("BG_SELECT_SURFACE", cRect, i))
+                }
+                curY += 2 * (cardH + gap) + 28f * sy
+                curY = drawDarkSettingsSlider(canvas, left, right, curY, sx, sy, "BG_SURF_INTENSITY", "Grain Intensity", "${cfg.grainIntensity.roundToInt()}%", cfg.grainIntensity / 100f)
+                curY = drawDarkSettingsSlider(canvas, left, right, curY, sx, sy, "BG_SURF_SCALE", "Texture Scale", "${cfg.textureScale.roundToInt()}%", (cfg.textureScale - 25f) / 225f)
+                drawDarkSettingsSlider(canvas, left, right, curY, sx, sy, "BG_SURF_WARMTH", "Warmth / Cool Tint", "${cfg.warmthTint.roundToInt()}", (cfg.warmthTint + 50f) / 100f)
+            }
+
+            1 -> { // GRIDS (Precision Architectural & Illustration Grids)
+                val gridNames = arrayOf("None", "Square", "Isometric", "Perspective", "Dot Matrix", "Thirds")
+                for (i in 0..5) {
+                    val r = i / 3
+                    val c = i % 3
+                    val cx = left + padX + c * (cardW + gap)
+                    val cy = curY + r * (cardH + gap)
+                    val cRect = RectF(cx, cy, cx + cardW, cy + cardH)
+                    val isSel = (cfg.gridPreset == i)
+
+                    fillPaint.color = if (isSel) Color.rgb(62, 74, 92) else Color.rgb(38, 38, 40)
+                    canvas.drawRoundRect(cRect, 12f * sx, 12f * sx, fillPaint)
+                    strokePaint.color = if (isSel) Color.rgb(65, 148, 238) else Color.rgb(72, 72, 76)
+                    strokePaint.strokeWidth = if (isSel) 4.2f * sx else 2f * sx
+                    canvas.drawRoundRect(cRect, 12f * sx, 12f * sx, strokePaint)
+
+                    drawGridPresetVectorIcon(canvas, cRect.centerX(), cRect.top + 52f * sy, 36f * sx, i, isSel)
+
+                    subTextPaint.color = if (isSel) Color.WHITE else Color.rgb(185, 185, 190)
+                    subTextPaint.textSize = 24f * sx
+                    subTextPaint.textAlign = Paint.Align.CENTER
+                    canvas.drawText(gridNames[i], cRect.centerX(), cRect.bottom - 20f * sy, subTextPaint)
+                    hits.add(ModalHit("BG_SELECT_GRID", cRect, i))
+                }
+                curY += 2 * (cardH + gap) + 28f * sy
+                curY = drawDarkSettingsSlider(canvas, left, right, curY, sx, sy, "BG_GRID_SPACING", "Grid Spacing", "${cfg.gridSpacing.roundToInt()} px", (cfg.gridSpacing - 20f) / 280f)
+                curY = drawDarkSettingsSlider(canvas, left, right, curY, sx, sy, "BG_GRID_OPACITY", "Grid Opacity", "${cfg.gridOpacity.roundToInt()}%", (cfg.gridOpacity - 5f) / 95f)
+                curY = drawDarkSettingsSlider(canvas, left, right, curY, sx, sy, "BG_GRID_SUBDIV", "Subdivisions / Density", "${cfg.gridSubdivisions.roundToInt()}", (cfg.gridSubdivisions - 1f) / 7f)
+
+                // Invert Contrast Toggle Chip
+                val chipRect = RectF(left + 40f * sx, curY + 8f * sy, right - 40f * sx, curY + 92f * sy)
+                fillPaint.color = if (cfg.invertGridContrast) Color.rgb(55, 116, 205) else Color.rgb(62, 62, 66)
+                canvas.drawRoundRect(chipRect, 10f * sx, 10f * sx, fillPaint)
+                textPaint.color = Color.WHITE
+                textPaint.textSize = 30f * sx
+                textPaint.textAlign = Paint.Align.CENTER
+                canvas.drawText(if (cfg.invertGridContrast) "Grid Line Contrast: Inverted" else "Grid Line Contrast: Auto", chipRect.centerX(), chipRect.centerY() + 10f * sy, textPaint)
+                hits.add(ModalHit("BG_TOGGLE_GRID_CONTRAST", chipRect))
+            }
+
+            else -> { // LIGHTING (Vignette & Horizon Gradient)
+                val lightNames = arrayOf("Flat", "Vignette", "Horizon", "Spotlight")
+                val lCardW = (panelW - padX * 2f - gap) / 2f
+                for (i in 0..3) {
+                    val r = i / 2
+                    val c = i % 2
+                    val cx = left + padX + c * (lCardW + gap)
+                    val cy = curY + r * (cardH + gap)
+                    val cRect = RectF(cx, cy, cx + lCardW, cy + cardH)
+                    val isSel = (cfg.lightingPreset == i)
+
+                    fillPaint.color = if (isSel) Color.rgb(62, 74, 92) else Color.rgb(38, 38, 40)
+                    canvas.drawRoundRect(cRect, 12f * sx, 12f * sx, fillPaint)
+                    strokePaint.color = if (isSel) Color.rgb(65, 148, 238) else Color.rgb(72, 72, 76)
+                    strokePaint.strokeWidth = if (isSel) 4.2f * sx else 2f * sx
+                    canvas.drawRoundRect(cRect, 12f * sx, 12f * sx, strokePaint)
+
+                    drawLightingPresetVectorIcon(canvas, cRect.centerX(), cRect.top + 52f * sy, 36f * sx, i, isSel)
+
+                    subTextPaint.color = if (isSel) Color.WHITE else Color.rgb(185, 185, 190)
+                    subTextPaint.textSize = 26f * sx
+                    subTextPaint.textAlign = Paint.Align.CENTER
+                    canvas.drawText(lightNames[i], cRect.centerX(), cRect.bottom - 20f * sy, subTextPaint)
+                    hits.add(ModalHit("BG_SELECT_LIGHTING", cRect, i))
+                }
+                curY += 2 * (cardH + gap) + 28f * sy
+                curY = drawDarkSettingsSlider(canvas, left, right, curY, sx, sy, "BG_LIGHT_STRENGTH", "Intensity", "${cfg.vignetteStrength.roundToInt()}%", cfg.vignetteStrength / 100f)
+                curY = drawDarkSettingsSlider(canvas, left, right, curY, sx, sy, "BG_LIGHT_SOFT", "Softness / Spread", "${cfg.vignetteSoftness.roundToInt()}%", (cfg.vignetteSoftness - 10f) / 90f)
+                drawDarkSettingsSlider(canvas, left, right, curY, sx, sy, "BG_LIGHT_ELEV", "Focus Elevation", "${cfg.focusElevation.roundToInt()}%", cfg.focusElevation / 100f)
+            }
+        }
+
+        // Pinned Reset Background Button
+        val resetTop = bottom - 124f * sy
+        fillPaint.color = Color.rgb(48, 48, 50)
+        canvas.drawRect(left, resetTop, right, bottom, fillPaint)
+        strokePaint.color = Color.rgb(185, 185, 185)
+        strokePaint.strokeWidth = 2f
+        canvas.drawLine(left, resetTop, right, resetTop, strokePaint)
+
+        textPaint.color = Color.WHITE
+        textPaint.textSize = 37f * sx
+        textPaint.textAlign = Paint.Align.CENTER
+        canvas.drawText("Reset Background Studio", (left + right) * 0.5f, resetTop + 76f * sy, textPaint)
+        hits.add(ModalHit("BG_RESET_STUDIO", RectF(left, resetTop, right, bottom)))
+    }
+
+    private fun drawBgStudioTopIcon(c: Canvas, cx: Float, cy: Float, size: Float) {
+        strokePaint.color = Color.rgb(232, 232, 232)
+        strokePaint.strokeWidth = size * 0.065f
+        val r = size * 0.44f
+        c.drawRect(cx - r, cy - r, cx + r, cy + r, strokePaint)
+        c.drawLine(cx - r, cy - r * 0.33f, cx + r, cy - r * 0.33f, strokePaint)
+        c.drawLine(cx - r, cy + r * 0.33f, cx + r, cy + r * 0.33f, strokePaint)
+        c.drawLine(cx - r * 0.33f, cy - r, cx - r * 0.33f, cy + r, strokePaint)
+        c.drawLine(cx + r * 0.33f, cy - r, cx + r * 0.33f, cy + r, strokePaint)
+    }
+
+    private fun drawSurfacePresetVectorIcon(c: Canvas, cx: Float, cy: Float, r: Float, preset: Int, selected: Boolean) {
+        val col = if (selected) Color.rgb(95, 175, 255) else Color.rgb(195, 195, 200)
+        strokePaint.color = col
+        strokePaint.strokeWidth = r * 0.1f
+        fillPaint.color = col
+        c.drawRect(cx - r, cy - r * 0.7f, cx + r, cy + r * 0.7f, strokePaint)
+        when (preset) {
+            1 -> { // Cold press waves
+                c.drawLine(cx - r * 0.65f, cy - r * 0.2f, cx + r * 0.65f, cy - r * 0.2f, strokePaint)
+                c.drawLine(cx - r * 0.45f, cy + r * 0.25f, cx + r * 0.65f, cy + r * 0.25f, strokePaint)
+            }
+            2 -> { // Woven canvas crosshatch
+                for (k in -1..1) {
+                    val o = k * r * 0.42f
+                    c.drawLine(cx + o, cy - r * 0.6f, cx + o, cy + r * 0.6f, strokePaint)
+                    c.drawLine(cx - r * 0.8f, cy + o * 0.7f, cx + r * 0.8f, cy + o * 0.7f, strokePaint)
+                }
+            }
+            3 -> { // Charcoal laid lines
+                for (k in -2..2) {
+                    val y = cy + k * r * 0.24f
+                    c.drawLine(cx - r * 0.8f, y, cx + r * 0.8f, y, strokePaint)
+                }
+            }
+            4 -> { // Halftone dots
+                for (dx in -1..1) for (dy in -1..1) {
+                    c.drawCircle(cx + dx * r * 0.48f, cy + dy * r * 0.36f, r * 0.1f, fillPaint)
+                }
+            }
+            5 -> { // Parchment diagonal grain
+                c.drawLine(cx - r * 0.7f, cy + r * 0.4f, cx + r * 0.7f, cy - r * 0.4f, strokePaint)
+                c.drawLine(cx - r * 0.3f, cy + r * 0.5f, cx + r * 0.7f, cy - r * 0.1f, strokePaint)
+            }
+        }
+    }
+
+    private fun drawGridPresetVectorIcon(c: Canvas, cx: Float, cy: Float, r: Float, preset: Int, selected: Boolean) {
+        val col = if (selected) Color.rgb(95, 175, 255) else Color.rgb(195, 195, 200)
+        strokePaint.color = col
+        strokePaint.strokeWidth = r * 0.09f
+        fillPaint.color = col
+        when (preset) {
+            0 -> {
+                c.drawCircle(cx, cy, r * 0.65f, strokePaint)
+                c.drawLine(cx - r * 0.45f, cy + r * 0.45f, cx + r * 0.45f, cy - r * 0.45f, strokePaint)
+            }
+            1 -> {
+                c.drawRect(cx - r, cy - r * 0.7f, cx + r, cy + r * 0.7f, strokePaint)
+                c.drawLine(cx, cy - r * 0.7f, cx, cy + r * 0.7f, strokePaint)
+                c.drawLine(cx - r, cy, cx + r, cy, strokePaint)
+            }
+            2 -> {
+                c.drawLine(cx - r, cy - r * 0.6f, cx + r, cy + r * 0.6f, strokePaint)
+                c.drawLine(cx - r, cy + r * 0.6f, cx + r, cy - r * 0.6f, strokePaint)
+                c.drawLine(cx, cy - r * 0.7f, cx, cy + r * 0.7f, strokePaint)
+            }
+            3 -> {
+                c.drawLine(cx - r, cy, cx + r, cy, strokePaint)
+                c.drawLine(cx, cy, cx - r * 0.85f, cy + r * 0.7f, strokePaint)
+                c.drawLine(cx, cy, cx + r * 0.85f, cy + r * 0.7f, strokePaint)
+                c.drawLine(cx, cy, cx - r * 0.85f, cy - r * 0.7f, strokePaint)
+                c.drawLine(cx, cy, cx + r * 0.85f, cy - r * 0.7f, strokePaint)
+            }
+            4 -> {
+                for (dx in -1..1) for (dy in -1..1) {
+                    c.drawCircle(cx + dx * r * 0.55f, cy + dy * r * 0.45f, r * 0.11f, fillPaint)
+                }
+            }
+            5 -> {
+                c.drawRect(cx - r, cy - r * 0.7f, cx + r, cy + r * 0.7f, strokePaint)
+                c.drawLine(cx - r * 0.33f, cy - r * 0.7f, cx - r * 0.33f, cy + r * 0.7f, strokePaint)
+                c.drawLine(cx + r * 0.33f, cy - r * 0.7f, cx + r * 0.33f, cy + r * 0.7f, strokePaint)
+            }
+        }
+    }
+
+    private fun drawLightingPresetVectorIcon(c: Canvas, cx: Float, cy: Float, r: Float, preset: Int, selected: Boolean) {
+        val col = if (selected) Color.rgb(95, 175, 255) else Color.rgb(195, 195, 200)
+        strokePaint.color = col
+        strokePaint.strokeWidth = r * 0.1f
+        fillPaint.color = col
+        c.drawRect(cx - r, cy - r * 0.7f, cx + r, cy + r * 0.7f, strokePaint)
+        when (preset) {
+            1 -> c.drawCircle(cx, cy, r * 0.45f, strokePaint)
+            2 -> c.drawLine(cx - r, cy, cx + r, cy, strokePaint)
+            3 -> c.drawCircle(cx, cy, r * 0.35f, fillPaint)
+        }
+    }
+
+    // ==========================================================================
+    // 1-TO-1 BRUSH MODAL
     // ==========================================================================
     private fun drawBrushModalContent(
         canvas: Canvas,
@@ -133,7 +456,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
         val panelW = right - left
         val topTabH = 132f * sy
 
-        // 1. Top 2 Sub-Menu Tabs (Brush Library Grid vs Brush Settings Sliders)
         val midX = left + panelW * 0.5f
         val leftTabRect = RectF(left, top, midX, top + topTabH)
         val rightTabRect = RectF(midX, top, right, top + topTabH)
@@ -150,7 +472,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
         hits.add(ModalHit("TAB_BRUSH_LIBRARY", leftTabRect))
         hits.add(ModalHit("TAB_BRUSH_SETTINGS", rightTabRect))
 
-        // 2. Pinned Live Contained Brush Stroke Preview Area (y = top+132 .. top+298)
         val prevTop = top + topTabH
         val prevH = 166f * sy
         val prevRect = RectF(left, prevTop, right, prevTop + prevH)
@@ -161,7 +482,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
         val activeSet = selectedSet()
         drawContainedBrushPreview(canvas, prevRect, activeBrush, sx)
 
-        // 3. Pinned Selected Brush Info Bar (y = prevBot .. prevBot+158, #F0F0F0)
         val infoTop = prevRect.bottom
         val infoH = 158f * sy
         val infoBot = infoTop + infoH
@@ -169,11 +489,9 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
         fillPaint.color = Color.rgb(240, 240, 240)
         canvas.drawRect(infoRect, fillPaint)
 
-        // Brush Icon on left of Info Bar
         val iconRect = RectF(left + 28f * sx, infoTop + 16f * sy, left + 124f * sx, infoBot - 14f * sy)
         drawRealisticBrushIcon(canvas, iconRect, activeBrush.iconStyle, sx)
 
-        // Brush Name + Set Name subtitle
         textPaint.color = Color.rgb(90, 90, 90)
         textPaint.textSize = 42f * sx
         textPaint.textAlign = Paint.Align.LEFT
@@ -186,34 +504,21 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
         subTextPaint.textAlign = Paint.Align.LEFT
         canvas.drawText(ellipsizeText(activeSet.name, subTextPaint, maxInfoTextW), left + 150f * sx, infoTop + 128f * sy, subTextPaint)
 
-        // In Brush Settings tab (or when Set/Brush overlay is open), show the '≡' box icon on the right of Info Bar!
         if (brushTopTab == BrushModalTopTab.SETTINGS_SLIDERS || subOverlay == BrushSubOverlay.SET_SETTINGS || subOverlay == BrushSubOverlay.BRUSH_ACTIONS) {
             val listBtnRect = RectF(right - 120f * sx, infoTop + 26f * sy, right - 24f * sx, infoBot - 26f * sy)
             SketchIcons.drawTopIcon1Menu(canvas, listBtnRect.centerX(), listBtnRect.centerY(), 125f * sx, Color.rgb(95, 95, 95))
             hits.add(ModalHit("BTN_PINNED_BRUSH_ACTIONS", listBtnRect))
         }
 
-        // 4. Body Area Below Pinned Header (infoBot .. bottom)
         val bodyTop = infoBot
         when {
-            subOverlay == BrushSubOverlay.SET_SETTINGS -> {
-                drawSetSettingsOverlay(canvas, left, bodyTop, right, bottom, sx, sy)
-            }
-            subOverlay == BrushSubOverlay.BRUSH_ACTIONS -> {
-                drawBrushActionsOverlay(canvas, left, bodyTop, right, bottom, sx, sy)
-            }
-            brushTopTab == BrushModalTopTab.LIBRARY_GRID -> {
-                drawScrollableBrushLibraryGrid(canvas, left, bodyTop, right, bottom, sx, sy)
-            }
-            else -> {
-                drawBrushSettingsSlidersPanel(canvas, left, bodyTop, right, bottom, sx, sy, activeBrush)
-            }
+            subOverlay == BrushSubOverlay.SET_SETTINGS -> drawSetSettingsOverlay(canvas, left, bodyTop, right, bottom, sx, sy)
+            subOverlay == BrushSubOverlay.BRUSH_ACTIONS -> drawBrushActionsOverlay(canvas, left, bodyTop, right, bottom, sx, sy)
+            brushTopTab == BrushModalTopTab.LIBRARY_GRID -> drawScrollableBrushLibraryGrid(canvas, left, bodyTop, right, bottom, sx, sy)
+            else -> drawBrushSettingsSlidersPanel(canvas, left, bodyTop, right, bottom, sx, sy, activeBrush)
         }
     }
 
-    /**
-     * Renders a rich, realistic, contained S-curve stroke preview matching 115925.jpg & 115938.jpg.
-     */
     private fun ellipsizeText(str: String, paint: Paint, maxW: Float): String {
         if (paint.measureText(str) <= maxW) return str
         var s = str
@@ -362,7 +667,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
         for ((sIdx, set) in brushSets.withIndex()) {
             val isThisSetSelected = (sIdx == selectedSetIndex)
 
-            // Set Header Row: Set Name on left, Pin Circle + (if active set) '≡' Set Settings button on right!
             if (curY + setHeaderH >= top && curY <= bottom) {
                 textPaint.color = Color.rgb(92, 92, 92)
                 textPaint.textSize = 37f * sx
@@ -383,7 +687,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
             }
             curY += setHeaderH
 
-            // 5-Column Grid of Brushes in this Set
             val rows = (set.brushes.size + 4) / 5
             for (r in 0 until rows) {
                 val rowTop = curY + r * cellH
@@ -422,24 +725,11 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
             curY += rows * cellH + 28f * sy
         }
 
-        // Small bottom-right scroll indicator diamond matching 115925.jpg
         drawCornerScrollArrows(canvas, right - 24f * sx, bottom - 24f * sy, 18f * sx)
         canvas.restore()
     }
 
-    // ==========================================================================
-    // SET SETTINGS MENU (120549.jpg — Filtered to Rename Set, Create New Set,
-    // Duplicate Brush, and Delete Set with "confirm" prompt)
-    // ==========================================================================
-    private fun drawSetSettingsOverlay(
-        canvas: Canvas,
-        left: Float,
-        top: Float,
-        right: Float,
-        bottom: Float,
-        sx: Float,
-        sy: Float
-    ) {
+    private fun drawSetSettingsOverlay(canvas: Canvas, left: Float, top: Float, right: Float, bottom: Float, sx: Float, sy: Float) {
         fillPaint.color = Color.rgb(235, 235, 235)
         canvas.drawRect(left, top, right, bottom, fillPaint)
 
@@ -476,18 +766,7 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
         }
     }
 
-    // ==========================================================================
-    // BRUSH ACTION MENU (121020.jpg — Rename, Duplicate, Change Icon, Export Icon, Delete)
-    // ==========================================================================
-    private fun drawBrushActionsOverlay(
-        canvas: Canvas,
-        left: Float,
-        top: Float,
-        right: Float,
-        bottom: Float,
-        sx: Float,
-        sy: Float
-    ) {
+    private fun drawBrushActionsOverlay(canvas: Canvas, left: Float, top: Float, right: Float, bottom: Float, sx: Float, sy: Float) {
         fillPaint.color = Color.rgb(235, 235, 235)
         canvas.drawRect(left, top, right, bottom, fillPaint)
 
@@ -528,9 +807,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
         }
     }
 
-    // ==========================================================================
-    // BRUSH SETTINGS PANEL (115938.jpg, 121144.jpg, 121151.jpg)
-    // ==========================================================================
     private fun drawBrushSettingsSlidersPanel(
         canvas: Canvas,
         left: Float,
@@ -545,7 +821,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
         fillPaint.color = Color.rgb(48, 48, 48)
         canvas.drawRect(left, top, right, bottom, fillPaint)
 
-        // 1. "Brush Types:    Standard >" Row
         val typeRowH = 148f * sy
         val typeRowBot = top + typeRowH
         textPaint.color = Color.WHITE
@@ -556,7 +831,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
         textPaint.textAlign = Paint.Align.RIGHT
         canvas.drawText(brush.brushType.title, right - 102f * sx, top + 90f * sy, textPaint)
 
-        // '>' or 'v' chevron
         val chevX = right - 54f * sx
         val chevY = top + 76f * sy
         strokePaint.color = Color.WHITE
@@ -570,7 +844,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
         }
         hits.add(ModalHit("TOGGLE_BRUSH_TYPES_DROPDOWN", RectF(left, top, right, typeRowBot)))
 
-        // 2. "BASIC | ADVANCED" Sub-Tabs Bar (y = typeRowBot .. typeRowBot + 128)
         val subTabH = 128f * sy
         val subTabBot = typeRowBot + subTabH
         val midX = left + panelW * 0.5f
@@ -591,7 +864,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
         hits.add(ModalHit("SUBTAB_BASIC", RectF(left, typeRowBot, midX, subTabBot)))
         hits.add(ModalHit("SUBTAB_ADVANCED", RectF(midX, typeRowBot, right, subTabBot)))
 
-        // 3. Pinned Bottom "Reset" Button (bottom - 130 .. bottom)
         val resetH = 130f * sy
         val resetTop = bottom - resetH
         val contentBottom = resetTop
@@ -619,7 +891,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
             drawAdvancedAccordionSections(canvas, left, subTabBot, right, contentBottom, sx, sy, brush)
         }
 
-        // Draw Pinned Reset Button
         fillPaint.color = Color.rgb(48, 48, 48)
         canvas.drawRect(left, resetTop, right, bottom, fillPaint)
         strokePaint.color = Color.rgb(190, 190, 190)
@@ -632,7 +903,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
         canvas.drawText("Reset", (left + right) * 0.5f, resetTop + 80f * sy, textPaint)
         hits.add(ModalHit("BTN_RESET_BRUSH", RectF(left, resetTop, right, bottom)))
 
-        // If Brush Types Dropdown is open, render it overlaying the settings area (matching 121144.jpg)
         if (subOverlay == BrushSubOverlay.BRUSH_TYPES_DROPDOWN) {
             drawBrushTypesDropdownOverlay(canvas, left + 22f * sx, subTabBot - 18f * sy, right - 22f * sx, bottom, sx, sy, brush)
         }
@@ -691,21 +961,21 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
             if (expandedAdvancedSection == idx) {
                 curY += 18f * sy
                 when (idx) {
-                    0 -> { // Pressure
+                    0 -> {
                         curY = drawDarkSettingsSlider(canvas, left, right, curY, sx, sy, "ADV_PRESS_SIZE_HEAVY", "Size Heavy Pressure", "${brush.sizeHeavyPressure.roundToInt()}%", brush.sizeHeavyPressure / 100f)
                         curY = drawDarkSettingsSlider(canvas, left, right, curY, sx, sy, "ADV_PRESS_SIZE_LIGHT", "Size Light Pressure", "${brush.sizeLightPressure.roundToInt()}%", brush.sizeLightPressure / 100f)
                         curY = drawDarkSettingsSlider(canvas, left, right, curY, sx, sy, "ADV_PRESS_OPAC_LIGHT", "Min Opacity Pressure", "${brush.opacityLightPressure.roundToInt()}%", brush.opacityLightPressure / 100f)
                     }
-                    1 -> { // Stamp
+                    1 -> {
                         curY = drawDarkSettingsSlider(canvas, left, right, curY, sx, sy, "ADV_STAMP_SPACING", "Spacing", "${brush.spacing.roundToInt()}%", (brush.spacing - 2f) / 98f)
                         curY = drawDarkSettingsSlider(canvas, left, right, curY, sx, sy, "ADV_STAMP_ROUND", "Roundness", "${brush.roundness.roundToInt()}%", (brush.roundness - 10f) / 90f)
                         curY = drawDarkSettingsSlider(canvas, left, right, curY, sx, sy, "ADV_STAMP_ROT", "Rotation", "${brush.rotation.roundToInt()}°", (brush.rotation + 180f) / 360f)
                     }
-                    2 -> { // Nib
+                    2 -> {
                         curY = drawDarkSettingsSlider(canvas, left, right, curY, sx, sy, "ADV_NIB_HARDNESS", "Hardness", "${brush.hardness.roundToInt()}%", brush.hardness / 100f)
                         curY = drawDarkSettingsSlider(canvas, left, right, curY, sx, sy, "ADV_NIB_GRAIN", "Texture Grain", "${brush.grainStrength.roundToInt()}%", brush.grainStrength / 100f)
                     }
-                    3 -> { // Randomness
+                    3 -> {
                         curY = drawDarkSettingsSlider(canvas, left, right, curY, sx, sy, "ADV_RAND_SIZE", "Size Jitter", "${brush.sizeJitter.roundToInt()}%", brush.sizeJitter / 100f)
                         curY = drawDarkSettingsSlider(canvas, left, right, curY, sx, sy, "ADV_RAND_OPAC", "Opacity Jitter", "${brush.opacityJitter.roundToInt()}%", brush.opacityJitter / 100f)
                         curY = drawDarkSettingsSlider(canvas, left, right, curY, sx, sy, "ADV_RAND_SCATTER", "Scatter", "${brush.scatterJitter.roundToInt()}%", brush.scatterJitter / 100f)
@@ -730,36 +1000,33 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
     ): Float {
         val f = fraction.coerceIn(0f, 1f)
         textPaint.color = Color.WHITE
-        textPaint.textSize = 36f * sx
+        textPaint.textSize = 35f * sx
         textPaint.textAlign = Paint.Align.LEFT
-        canvas.drawText(label, left + 40f * sx, top + 46f * sy, textPaint)
+        canvas.drawText(label, left + 40f * sx, top + 44f * sy, textPaint)
 
         textPaint.textAlign = Paint.Align.RIGHT
-        canvas.drawText(valueStr, right - 40f * sx, top + 46f * sy, textPaint)
+        canvas.drawText(valueStr, right - 40f * sx, top + 44f * sy, textPaint)
 
         val trackLeft = left + 40f * sx
         val trackRight = right - 40f * sx
-        val trackY = top + 124f * sy
+        val trackY = top + 114f * sy
         val thumbX = trackLeft + (trackRight - trackLeft) * f
 
-        // Unfilled right track (#A8A8A8)
         strokePaint.color = Color.rgb(168, 168, 168)
         strokePaint.strokeWidth = 4.2f * sx
         canvas.drawLine(thumbX, trackY, trackRight, trackY, strokePaint)
 
-        // Filled left track (#509AE3)
         strokePaint.color = Color.rgb(80, 154, 227)
         strokePaint.strokeWidth = 5.2f * sx
         canvas.drawLine(trackLeft, trackY, thumbX, trackY, strokePaint)
 
-        // White circular thumb knob
         val knobR = 26f * sx
         fillPaint.color = Color.WHITE
         canvas.drawCircle(thumbX, trackY, knobR, fillPaint)
 
-        val hitRect = RectF(trackLeft - 30f * sx, trackY - 48f * sy, trackRight + 30f * sx, trackY + 48f * sy)
+        val hitRect = RectF(trackLeft - 30f * sx, trackY - 46f * sy, trackRight + 30f * sx, trackY + 46f * sy)
         sliderRects[id] = hitRect
-        return top + 195f * sy
+        return top + 178f * sy
     }
 
     private fun drawBrushTypesDropdownOverlay(
@@ -789,7 +1056,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
             canvas.drawText(t.title, left + 42f * sx, ry + 80f * sy, textPaint)
 
             if (isSel) {
-                // Blue checkmark matching 121144.jpg
                 strokePaint.color = Color.rgb(55, 140, 235)
                 strokePaint.strokeWidth = 5f * sx
                 val cx = right - 95f * sx
@@ -803,7 +1069,7 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
     }
 
     // ==========================================================================
-    // 1-TO-1 SKETCHBOOK COLOR MENU (115958.jpg)
+    // 1-TO-1 SKETCHBOOK COLOR MENU
     // ==========================================================================
     private fun drawColorModalContent(
         canvas: Canvas,
@@ -812,12 +1078,12 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
         right: Float,
         bottom: Float,
         sx: Float,
-        sy: Float
+        sy: Float,
+        bgMode: Boolean
     ) {
         val panelW = right - left
         val topTabH = 132f * sy
 
-        // 1. Top 3 Tabs (Color Wheel | Swatch Grid | Image Reference Picker)
         val tabW = panelW / 3f
         for (i in 0..2) {
             val tLeft = left + i * tabW
@@ -833,27 +1099,40 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
             hits.add(ModalHit("COLOR_TOP_TAB", tRect, i))
         }
 
-        // Dark #343434 Body
         val bodyTop = top + topTabH
-        fillPaint.color = Color.rgb(52, 52, 52)
-        canvas.drawRect(left, bodyTop, right, bottom, fillPaint)
-
         if (colorState.topTabIndex == 1) {
+            fillPaint.color = Color.rgb(52, 52, 52)
+            canvas.drawRect(left, bodyTop, right, bottom, fillPaint)
             drawFullCopicSwatchGridTab(canvas, left, bodyTop, right, bottom, sx, sy)
             return
         }
 
-        // 2. Top Swatch Box + Complementary Strip + Color History Strip (y = bodyTop..bodyTop+290)
+        drawColorWheelBody(canvas, left, bodyTop, right, bottom, sx, sy, state = colorState, isBgMode = bgMode)
+    }
+
+    private fun drawColorWheelBody(
+        canvas: Canvas,
+        left: Float,
+        bodyTop: Float,
+        right: Float,
+        bottom: Float,
+        sx: Float,
+        sy: Float,
+        state: ColorStudioState,
+        isBgMode: Boolean
+    ) {
+        val panelW = right - left
+        fillPaint.color = Color.rgb(52, 52, 52)
+        canvas.drawRect(left, bodyTop, right, bottom, fillPaint)
+
         val swatchBox = RectF(left + 28f * sx, bodyTop + 48f * sy, left + 220f * sx, bodyTop + 236f * sy)
         val halfSwW = swatchBox.width() * 0.5f
-        // Left half: Previous Color; Right half: Current Color
-        fillPaint.color = colorState.previousColor
+        fillPaint.color = state.previousColor
         canvas.drawRoundRect(RectF(swatchBox.left, swatchBox.top, swatchBox.left + halfSwW + 6f * sx, swatchBox.bottom), 8f * sx, 8f * sx, fillPaint)
-        fillPaint.color = colorState.currentColor
+        fillPaint.color = state.currentColor
         canvas.drawRoundRect(RectF(swatchBox.left + halfSwW, swatchBox.top, swatchBox.right, swatchBox.bottom), 8f * sx, 8f * sx, fillPaint)
         hits.add(ModalHit("REVERT_PREV_COLOR", RectF(swatchBox.left, swatchBox.top, swatchBox.left + halfSwW, swatchBox.bottom)))
 
-        // Complementary Label & 6-Chip Strip
         val stripLeft = left + 246f * sx
         val stripRight = right - 168f * sx
         subTextPaint.color = Color.WHITE
@@ -861,7 +1140,7 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
         subTextPaint.textAlign = Paint.Align.LEFT
         canvas.drawText("Complementary", stripLeft, bodyTop + 62f * sy, subTextPaint)
 
-        val compColors = colorState.computeHarmonyStrip()
+        val compColors = state.computeHarmonyStrip()
         val compTop = bodyTop + 82f * sy
         val compBot = bodyTop + 128f * sy
         val compChipW = (stripRight - stripLeft) / compColors.size
@@ -872,60 +1151,50 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
             hits.add(ModalHit("PICK_COMP_COLOR", cRect, cc))
         }
 
-        // Harmony Mode Cycle Button (Interlocking rings icon on right of Complementary)
         val harmCx = right - 88f * sx
         val harmCy = (compTop + compBot) * 0.5f
         drawHarmonyRingsIcon(canvas, harmCx, harmCy, 24f * sx)
         hits.add(ModalHit("CYCLE_HARMONY_MODE", RectF(harmCx - 42f * sx, harmCy - 42f * sy, harmCx + 42f * sx, harmCy + 42f * sy)))
 
-        // Color History Label & 9-Chip Strip
         canvas.drawText("Color History", stripLeft, bodyTop + 168f * sy, subTextPaint)
         val histTop = bodyTop + 188f * sy
         val histBot = bodyTop + 234f * sy
         val histChipW = (stripRight - stripLeft) / 9f
-        for (i in 0 until min(9, colorState.colorHistory.size)) {
-            val hc = colorState.colorHistory[i]
+        for (i in 0 until min(9, state.colorHistory.size)) {
+            val hc = state.colorHistory[i]
             val hRect = RectF(stripLeft + i * histChipW, histTop, stripLeft + (i + 1) * histChipW, histBot)
             fillPaint.color = hc
             canvas.drawRect(hRect, fillPaint)
             hits.add(ModalHit("PICK_HIST_COLOR", hRect, hc))
         }
 
-        // Barcode / Shuffle History Icon on right of Color History
         val barCx = right - 88f * sx
         val barCy = (histTop + histBot) * 0.5f
         drawBarcodeIcon(canvas, barCx, barCy, 22f * sx, Color.WHITE)
         hits.add(ModalHit("SHUFFLE_HISTORY_BAR", RectF(barCx - 42f * sx, barCy - 42f * sy, barCx + 42f * sx, barCy + 42f * sy)))
 
-        // 3. Center Precision Color Wheel + Rotated Saturation/Lightness Diamond
         wheelCx = (left + right) * 0.5f
         wheelCy = bodyTop + 668f * sy
         wheelOuterR = 324f * sx
         wheelInnerR = 222f * sx
         diamondHalfDiag = 192f * sx
 
-        // Top-Left Transparent Eraser Button (cx = left+78, cy = bodyTop+380)
-        val transCx = left + 78f * sx
-        val transCy = bodyTop + 382f * sy
-        drawTransparentEraserButton(canvas, transCx, transCy, 44f * sx, colorState.isColorlessEraser)
-        hits.add(ModalHit("TOGGLE_COLORLESS_ERASER", RectF(transCx - 52f * sx, transCy - 52f * sy, transCx + 52f * sx, transCy + 52f * sy)))
+        // Only show Transparent Colorless Eraser puck in Brush Color mode (not in Background Color mode matching 164119.jpg!)
+        if (!isBgMode) {
+            val transCx = left + 78f * sx
+            val transCy = bodyTop + 382f * sy
+            drawTransparentEraserButton(canvas, transCx, transCy, 44f * sx, state.isColorlessEraser)
+            hits.add(ModalHit("TOGGLE_COLORLESS_ERASER", RectF(transCx - 52f * sx, transCy - 52f * sy, transCx + 52f * sx, transCy + 52f * sy)))
+        }
 
-        // Top-Right Eyedropper Pipette Button (cx = right-78, cy = bodyTop+380)
         val dropCx = right - 78f * sx
         val dropCy = bodyTop + 382f * sy
         drawEyedropperIcon(canvas, dropCx, dropCy, 42f * sx)
         hits.add(ModalHit("ACTIVATE_EYEDROPPER", RectF(dropCx - 52f * sx, dropCy - 52f * sy, dropCx + 52f * sx, dropCy + 52f * sy)))
 
-        // Dark outer shadow ring + black inner circle backing
         fillPaint.color = Color.rgb(20, 20, 20)
         canvas.drawCircle(wheelCx, wheelCy, wheelOuterR + 12f * sx, fillPaint)
 
-        // Continuous 360° Hue Ring (0° at Right = Red, clockwise: Magenta -> Blue -> Cyan -> Green -> Yellow -> Red)
-        // Wait: Look at 115958.jpg!
-        // In 115958.jpg: Top is Yellow, Right is Orange/Red, Bottom-Right is Magenta, Bottom is Blue, Left is Green!
-        // Let's match the exact angular colors of 115958.jpg:
-        // Angle 0° (Right) = Red (#FF1E00), 60° (Bottom-Right) = Magenta (#FF00AA), 110° (Bottom) = Blue (#0018FF),
-        // 155° (Bottom-Left) = Cyan (#00E5FF), 205° (Left) = Green (#00FF18), 270° (Top) = Yellow (#FFD000), 360° = Red!
         val ringRadius = (wheelOuterR + wheelInnerR) * 0.5f
         val ringThickness = wheelOuterR - wheelInnerR
         val hueSweepColors = intArrayOf(
@@ -943,40 +1212,36 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
         canvas.drawCircle(wheelCx, wheelCy, ringRadius, strokePaint)
         strokePaint.shader = null
 
-        // Inner Rotated Diamond (Top = White, Bottom = Black, Right = Pure Hue, Left = 50% Gray)
-        drawRotatedSlDiamond(canvas, wheelCx, wheelCy, diamondHalfDiag, colorState.hue)
+        drawRotatedSlDiamond(canvas, wheelCx, wheelCy, diamondHalfDiag, state.hue)
 
-        // Hue Ring Indicator Thumb Circle
-        val hueAngleRad = hueToWheelAngleRad(colorState.hue)
+        val hueAngleRad = hueToWheelAngleRad(state.hue)
         val hThumbX = wheelCx + cos(hueAngleRad).toFloat() * ringRadius
         val hThumbY = wheelCy + sin(hueAngleRad).toFloat() * ringRadius
-        val pureHueColor = ColorStudioState.hslToColor(colorState.hue, 1f, 0.5f)
+        val pureHueColor = ColorStudioState.hslToColor(state.hue, 1f, 0.5f)
         drawSelectorRing(canvas, hThumbX, hThumbY, 27f * sx, pureHueColor)
 
-        // Diamond (S, L) Indicator Thumb Circle
-        val dPt = slToDiamondPoint(colorState.saturation, colorState.lightness, wheelCx, wheelCy, diamondHalfDiag)
-        drawSelectorRing(canvas, dPt.x, dPt.y, 27f * sx, colorState.currentColor)
+        val dPt = slToDiamondPoint(state.saturation, state.lightness, wheelCx, wheelCy, diamondHalfDiag)
+        drawSelectorRing(canvas, dPt.x, dPt.y, 27f * sx, state.currentColor)
 
-        // Bottom-Right HEX # Readout & Inline Editor
         subTextPaint.color = Color.rgb(138, 138, 138)
         subTextPaint.textSize = 33f * sx
         subTextPaint.textAlign = Paint.Align.RIGHT
         canvas.drawText("HEX #", right - 26f * sx, bodyTop + 926f * sy, subTextPaint)
 
-        val hexStr = String.format("%06X", 0xFFFFFF and colorState.currentColor)
+        val hexStr = String.format("%06X", 0xFFFFFF and state.currentColor)
         textPaint.color = Color.rgb(225, 225, 225)
         textPaint.textSize = 37f * sx
         textPaint.textAlign = Paint.Align.RIGHT
         canvas.drawText(hexStr, right - 26f * sx, bodyTop + 984f * sy, textPaint)
         hits.add(ModalHit("EDIT_HEX_COLOR", RectF(right - 210f * sx, bodyTop + 885f * sy, right - 12f * sx, bodyTop + 1005f * sy)))
 
-        // 4. Middle Mode Bar: HSL | RGB | Grid | Shuffle | Tonal Strip (y = bodyTop + 1065)
         val modeY = bodyTop + 1095f * sy
-        val modeSlotW = panelW / 5f
-        for (m in 0..4) {
+        val modeCount = if (isBgMode) 4 else 5
+        val modeSlotW = panelW / modeCount
+        for (m in 0 until modeCount) {
             val mx = left + (m + 0.5f) * modeSlotW
             val mRect = RectF(left + m * modeSlotW, modeY - 45f * sy, left + (m + 1) * modeSlotW, modeY + 45f * sy)
-            val isAct = (colorState.bottomModeIndex == m)
+            val isAct = (state.bottomModeIndex == m)
             val tint = if (isAct) Color.rgb(225, 225, 225) else Color.rgb(112, 112, 112)
             when (m) {
                 0 -> {
@@ -996,28 +1261,25 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
                     textPaint.isFakeBoldText = false
                 }
                 2 -> drawSmall3x2GridIcon(canvas, mx, modeY, 34f * sx, tint)
-                3 -> drawShuffleArrowsIcon(canvas, mx, modeY, 34f * sx, tint)
+                3 -> if (isBgMode) drawBarcodeIcon(canvas, mx, modeY, 30f * sx, tint) else drawShuffleArrowsIcon(canvas, mx, modeY, 34f * sx, tint)
                 4 -> drawBarcodeIcon(canvas, mx, modeY, 30f * sx, tint)
             }
             hits.add(ModalHit("COLOR_BOTTOM_MODE", mRect, m))
         }
 
-        // 5. Bottom Sliders (H/S/L or R/G/B) or Quick Swatches
         val slidersTop = bodyTop + 1190f * sy
-        if (colorState.bottomModeIndex == 1) {
-            // RGB Sliders
-            val r = Color.red(colorState.currentColor)
-            val g = Color.green(colorState.currentColor)
-            val b = Color.blue(colorState.currentColor)
+        if (state.bottomModeIndex == 1) {
+            val r = Color.red(state.currentColor)
+            val g = Color.green(state.currentColor)
+            val b = Color.blue(state.currentColor)
             drawColorChannelSlider(canvas, left, right, slidersTop, sx, sy, "COLOR_R", "R", r.toString(), r / 255f, Color.BLACK, Color.rgb(255, g, b))
             drawColorChannelSlider(canvas, left, right, slidersTop + 132f * sy, sx, sy, "COLOR_G", "G", g.toString(), g / 255f, Color.BLACK, Color.rgb(r, 255, b))
             drawColorChannelSlider(canvas, left, right, slidersTop + 264f * sy, sx, sy, "COLOR_B", "B", b.toString(), b / 255f, Color.BLACK, Color.rgb(r, g, 255))
         } else {
-            // HSL Sliders matching 115958.jpg
-            val hInt = colorState.hue.roundToInt()
-            val sInt = (colorState.saturation * 100f).roundToInt()
-            val lInt = (colorState.lightness * 100f).roundToInt()
-            val effL = colorState.lightness.coerceIn(0.08f, 0.92f)
+            val hInt = state.hue.roundToInt()
+            val sInt = (state.saturation * 100f).roundToInt()
+            val lInt = (state.lightness * 100f).roundToInt()
+            val effL = state.lightness.coerceIn(0.08f, 0.92f)
             val hSpectrum = intArrayOf(
                 ColorStudioState.hslToColor(0f, 1f, effL),
                 ColorStudioState.hslToColor(60f, 1f, effL),
@@ -1027,16 +1289,15 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
                 ColorStudioState.hslToColor(300f, 1f, effL),
                 ColorStudioState.hslToColor(360f, 1f, effL)
             )
-            val sStart = ColorStudioState.hslToColor(colorState.hue, 0f, effL)
-            val sEnd = ColorStudioState.hslToColor(colorState.hue, 1f, effL)
-            val lMid = ColorStudioState.hslToColor(colorState.hue, colorState.saturation, 0.5f)
-            drawMultiStopColorSlider(canvas, left, right, slidersTop, sx, sy, "COLOR_H", "H", hInt.toString(), colorState.hue / 360f, hSpectrum)
-            drawMultiStopColorSlider(canvas, left, right, slidersTop + 132f * sy, sx, sy, "COLOR_S", "S", sInt.toString(), colorState.saturation, intArrayOf(sStart, sEnd))
-            drawMultiStopColorSlider(canvas, left, right, slidersTop + 264f * sy, sx, sy, "COLOR_L", "L", lInt.toString(), colorState.lightness, intArrayOf(Color.BLACK, lMid, Color.WHITE))
+            val sStart = ColorStudioState.hslToColor(state.hue, 0f, effL)
+            val sEnd = ColorStudioState.hslToColor(state.hue, 1f, effL)
+            val lMid = ColorStudioState.hslToColor(state.hue, state.saturation, 0.5f)
+            drawMultiStopColorSlider(canvas, left, right, slidersTop, sx, sy, "COLOR_H", "H", hInt.toString(), state.hue / 360f, hSpectrum)
+            drawMultiStopColorSlider(canvas, left, right, slidersTop + 132f * sy, sx, sy, "COLOR_S", "S", sInt.toString(), state.saturation, intArrayOf(sStart, sEnd))
+            drawMultiStopColorSlider(canvas, left, right, slidersTop + 264f * sy, sx, sy, "COLOR_L", "L", lInt.toString(), state.lightness, intArrayOf(Color.BLACK, lMid, Color.WHITE))
         }
     }
 
-    
     private fun drawMultiStopColorSlider(
         canvas: Canvas,
         left: Float,
@@ -1116,24 +1377,22 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
 
     private fun drawRotatedSlDiamond(canvas: Canvas, cx: Float, cy: Float, halfDiag: Float, hue: Float) {
         val p = Path().apply {
-            moveTo(cx, cy - halfDiag) // Top = White
-            lineTo(cx + halfDiag, cy) // Right = Pure Hue
-            lineTo(cx, cy + halfDiag) // Bottom = Black
-            lineTo(cx - halfDiag, cy) // Left = Gray
+            moveTo(cx, cy - halfDiag)
+            lineTo(cx + halfDiag, cy)
+            lineTo(cx, cy + halfDiag)
+            lineTo(cx - halfDiag, cy)
             close()
         }
         canvas.save()
         canvas.clipPath(p)
 
         val pureHue = ColorStudioState.hslToColor(hue, 1f, 0.5f)
-        // Base horizontal gradient: Left (Gray) -> Right (Pure Hue)
         fillPaint.shader = LinearGradient(
             cx - halfDiag, cy, cx + halfDiag, cy,
             Color.rgb(128, 128, 128), pureHue, Shader.TileMode.CLAMP
         )
         canvas.drawRect(cx - halfDiag, cy - halfDiag, cx + halfDiag, cy + halfDiag, fillPaint)
 
-        // Vertical lightness overlay: Top (White) -> Middle (Transparent) -> Bottom (Black)
         fillPaint.shader = LinearGradient(
             cx, cy - halfDiag, cx, cy + halfDiag,
             intArrayOf(Color.WHITE, Color.TRANSPARENT, Color.BLACK),
@@ -1170,21 +1429,16 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
         }
     }
 
-    // ==========================================================================
-    // BOTTOM 3 FLOATING CIRCULAR BUTTONS (Color Wheel | X Close | Brush Studio)
-    // ==========================================================================
     private fun drawBottomThreeCircles(canvas: Canvas, viewW: Float, viewH: Float, sx: Float, sy: Float, isColorMode: Boolean) {
         val cy = viewH - 128f * sy
         val r = 61f * sx
 
-        // 1. Left Circle: Color Wheel Button (cx = 291 * sx)
         val leftCx = 291f * sx
         fillPaint.color = if (isColorMode) Color.rgb(69, 149, 230) else Color.rgb(33, 33, 33)
         canvas.drawCircle(leftCx, cy, r, fillPaint)
         SketchIcons.drawTopIcon6ColorWheel(canvas, leftCx, cy, r * 2.1f)
         hits.add(ModalHit("BOTTOM_CIRCLE_COLOR", RectF(leftCx - r, cy - r, leftCx + r, cy + r)))
 
-        // 2. Center Circle: Close 'X' (or '^' when dropdown is open) (cx = 539 * sx)
         val midCx = 539f * sx
         fillPaint.color = Color.rgb(33, 33, 33)
         canvas.drawCircle(midCx, cy, r, fillPaint)
@@ -1200,7 +1454,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
         }
         hits.add(ModalHit("BOTTOM_CIRCLE_CLOSE", RectF(midCx - r, cy - r, midCx + r, cy + r)))
 
-        // 3. Right Circle: Brush Menu Button (cx = 787 * sx)
         val rightCx = 787f * sx
         fillPaint.color = if (!isColorMode) Color.rgb(69, 149, 230) else Color.rgb(33, 33, 33)
         canvas.drawCircle(rightCx, cy, r, fillPaint)
@@ -1208,13 +1461,12 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
         hits.add(ModalHit("BOTTOM_CIRCLE_BRUSH", RectF(rightCx - r, cy - r, rightCx + r, cy + r)))
     }
 
-    // ==========================================================================
-    // TOUCH HANDLING FOR BRUSH & COLOR MODALS
-    // ==========================================================================
-    fun onTouchEvent(event: android.view.MotionEvent, viewW: Float, viewH: Float, isColorMode: Boolean): Boolean {
+    fun onTouchEvent(event: android.view.MotionEvent, viewW: Float, viewH: Float, isColorMode: Boolean, isBgColorMode: Boolean = false): Boolean {
         val x = event.x
         val y = event.y
         val sx = viewW / 1080f
+        activeBgModeInTouch = isBgColorMode
+        val activeColState = if (isBgColorMode) bgColorState else colorState
 
         when (event.actionMasked) {
             android.view.MotionEvent.ACTION_DOWN -> {
@@ -1227,7 +1479,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
                 isScrollingLibrary = false
                 isScrollingAdvanced = false
 
-                // Check sliders first
                 for ((id, rect) in sliderRects) {
                     if (rect.contains(x, y)) {
                         draggingSliderId = id
@@ -1237,19 +1488,18 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
                     }
                 }
 
-                // Check Color Wheel & Diamond if in Color Mode
-                if (isColorMode && colorState.topTabIndex == 0) {
+                if ((isColorMode || isBgColorMode) && activeColState.topTabIndex == 0) {
                     val dist = hypot(x - wheelCx, y - wheelCy)
                     if (dist in (wheelInnerR - 18f * sx)..(wheelOuterR + 24f * sx)) {
                         isDraggingHueRing = true
-                        updateHueFromTouch(x, y)
+                        updateHueFromTouch(x, y, activeColState)
                         hostView.invalidate()
                         return true
                     }
                     val manhattan = abs(x - wheelCx) + abs(y - wheelCy)
                     if (manhattan <= diamondHalfDiag + 16f * sx) {
                         isDraggingSlDiamond = true
-                        updateSlFromDiamondTouch(x, y)
+                        updateSlFromDiamondTouch(x, y, activeColState)
                         hostView.invalidate()
                         return true
                     }
@@ -1267,18 +1517,18 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
                     return true
                 }
                 if (isDraggingHueRing) {
-                    updateHueFromTouch(x, y)
+                    updateHueFromTouch(x, y, activeColState)
                     hostView.invalidate()
                     return true
                 }
                 if (isDraggingSlDiamond) {
-                    updateSlFromDiamondTouch(x, y)
+                    updateSlFromDiamondTouch(x, y, activeColState)
                     hostView.invalidate()
                     return true
                 }
 
                 if (abs(y - downY) > 15f * sx) {
-                    if (!isColorMode && subOverlay == BrushSubOverlay.NONE) {
+                    if (!isColorMode && !isBgColorMode && subOverlay == BrushSubOverlay.NONE) {
                         if (brushTopTab == BrushModalTopTab.LIBRARY_GRID && libraryScrollBounds.contains(downX, downY)) {
                             isScrollingLibrary = true
                             libraryScrollY -= dy
@@ -1301,6 +1551,9 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
 
             android.view.MotionEvent.ACTION_UP -> {
                 val wasDragging = (draggingSliderId != null || isDraggingHueRing || isDraggingSlDiamond || isScrollingLibrary || isScrollingAdvanced)
+                if (isBgColorMode && (isDraggingHueRing || isDraggingSlDiamond || draggingSliderId?.startsWith("COLOR_") == true)) {
+                    bgColorState.pushToHistory(bgColorState.currentColor)
+                }
                 draggingSliderId = null
                 isDraggingHueRing = false
                 isDraggingSlDiamond = false
@@ -1308,7 +1561,7 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
                 isScrollingAdvanced = false
 
                 if (!wasDragging && abs(x - downX) < 30f * sx && abs(y - downY) < 30f * sx) {
-                    handleModalTap(x, y)
+                    handleModalTap(x, y, isBgColorMode)
                 }
                 hostView.invalidate()
                 return true
@@ -1317,7 +1570,15 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
         return true
     }
 
-    private fun handleModalTap(x: Float, y: Float) {
+    private fun applyLiveBackgroundColorChange() {
+        if (activeBgModeInTouch) {
+            hostView.project.backgroundColor = bgColorState.currentColor
+            hostView.project.backgroundVisible = true
+            hostView.project.isDirty = true
+        }
+    }
+
+    private fun handleModalTap(x: Float, y: Float, isBgColorMode: Boolean) {
         var hit: ModalHit? = null
         for (i in hits.size - 1 downTo 0) {
             if (hits[i].rect.contains(x, y)) {
@@ -1329,6 +1590,7 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
 
         val brush = selectedBrush()
         val set = selectedSet()
+        val activeColState = if (isBgColorMode) bgColorState else colorState
 
         when (hit.id) {
             "BOTTOM_CIRCLE_COLOR" -> {
@@ -1345,6 +1607,37 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
                 } else {
                     hostView.popupState = TopPopupState.NONE
                 }
+            }
+            "BG_TOP_TAB" -> {
+                bgColorState.topTabIndex = hit.arg1.coerceIn(0, 1)
+            }
+            "BG_STUDIO_SUBTAB" -> {
+                hostView.project.backgroundConfig.studioSubTab = hit.arg1.coerceIn(0, 2)
+            }
+            "BG_SELECT_SURFACE" -> {
+                hostView.project.backgroundConfig.surfacePreset = hit.arg1.coerceIn(0, 5)
+                hostView.project.backgroundVisible = true
+                hostView.project.isDirty = true
+            }
+            "BG_SELECT_GRID" -> {
+                hostView.project.backgroundConfig.gridPreset = hit.arg1.coerceIn(0, 5)
+                hostView.project.backgroundVisible = true
+                hostView.project.isDirty = true
+            }
+            "BG_TOGGLE_GRID_CONTRAST" -> {
+                val cfg = hostView.project.backgroundConfig
+                cfg.invertGridContrast = !cfg.invertGridContrast
+                hostView.project.isDirty = true
+            }
+            "BG_SELECT_LIGHTING" -> {
+                hostView.project.backgroundConfig.lightingPreset = hit.arg1.coerceIn(0, 3)
+                hostView.project.backgroundVisible = true
+                hostView.project.isDirty = true
+            }
+            "BG_RESET_STUDIO" -> {
+                hostView.project.backgroundConfig.reset()
+                hostView.project.isDirty = true
+                hostView.showBanner("Background Studio Reset")
             }
             "TAB_BRUSH_LIBRARY" -> {
                 brushTopTab = BrushModalTopTab.LIBRARY_GRID
@@ -1375,7 +1668,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
                     else -> BrushSubOverlay.NONE
                 }
             }
-            // Set Settings 4 Actions: Rename Set, Create New Set, Duplicate Brush, Delete Set ("confirm")
             "SET_ACT_RENAME" -> {
                 hostView.showSimpleInputModal("Rename Set", set.name) { newName ->
                     if (newName.isNotBlank()) set.name = newName.trim()
@@ -1387,9 +1679,7 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
                 val newSet = SketchBrushSet(
                     id = "set_${System.currentTimeMillis()}",
                     name = "New Set ${brushSets.size + 1}",
-                    brushes = mutableListOf(
-                        brush.copy(id = "b_${System.currentTimeMillis()}", name = brush.name)
-                    )
+                    brushes = mutableListOf(brush.copy(id = "b_${System.currentTimeMillis()}", name = brush.name))
                 )
                 val insertPos = (selectedSetIndex + 1).coerceIn(0, brushSets.size)
                 brushSets.add(insertPos, newSet)
@@ -1399,10 +1689,7 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
                 hostView.showBanner("Created '${newSet.name}' below current set")
             }
             "SET_ACT_DUPLICATE_BRUSH" -> {
-                val dup = brush.copy(
-                    id = "b_${System.currentTimeMillis()}",
-                    name = "Duplicate"
-                )
+                val dup = brush.copy(id = "b_${System.currentTimeMillis()}", name = "Duplicate")
                 val insertIdx = (selectedBrushIndex + 1).coerceIn(0, set.brushes.size)
                 set.brushes.add(insertIdx, dup)
                 selectedBrushIndex = insertIdx
@@ -1423,7 +1710,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
                     }
                 }
             }
-            // Brush Actions 5 Options: Rename, Duplicate, Change Icon, Export Icon, Delete
             "BRUSH_ACT_RENAME" -> {
                 hostView.showSimpleInputModal("Rename Brush", brush.name) { newName ->
                     if (newName.isNotBlank()) brush.name = newName.trim()
@@ -1459,50 +1745,42 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
                     hostView.showBanner("Brush Deleted")
                 }
             }
-            // Brush Settings & Types
             "TOGGLE_BRUSH_TYPES_DROPDOWN" -> {
                 subOverlay = if (subOverlay == BrushSubOverlay.BRUSH_TYPES_DROPDOWN) BrushSubOverlay.NONE else BrushSubOverlay.BRUSH_TYPES_DROPDOWN
             }
             "SELECT_BRUSH_TYPE" -> {
                 val types = SketchBrushType.values()
-                if (hit.arg1 in types.indices) {
-                    brush.brushType = types[hit.arg1]
-                }
+                if (hit.arg1 in types.indices) brush.brushType = types[hit.arg1]
                 subOverlay = BrushSubOverlay.NONE
             }
-            "SUBTAB_BASIC" -> {
-                settingsSubTab = BrushSettingsSubTab.BASIC
-            }
-            "SUBTAB_ADVANCED" -> {
-                settingsSubTab = BrushSettingsSubTab.ADVANCED
-            }
-            "TOGGLE_ADV_SECTION" -> {
-                expandedAdvancedSection = if (expandedAdvancedSection == hit.arg1) -1 else hit.arg1
-            }
+            "SUBTAB_BASIC" -> settingsSubTab = BrushSettingsSubTab.BASIC
+            "SUBTAB_ADVANCED" -> settingsSubTab = BrushSettingsSubTab.ADVANCED
+            "TOGGLE_ADV_SECTION" -> expandedAdvancedSection = if (expandedAdvancedSection == hit.arg1) -1 else hit.arg1
             "BTN_RESET_BRUSH" -> {
                 brush.resetToDefault()
                 hostView.showBanner("Brush Reset to Default")
             }
-            // Color Menu Actions
             "COLOR_TOP_TAB" -> {
                 if (hit.arg1 == 2) {
                     hostView.popupState = TopPopupState.NONE
-                    hostView.activateOnCanvasEyedropper()
+                    hostView.activateOnCanvasEyedropper(forBackground = false)
                 } else {
                     colorState.topTabIndex = hit.arg1
                 }
             }
             "REVERT_PREV_COLOR" -> {
-                colorState.setFromColorInt(colorState.previousColor, recordPrevious = true)
+                activeColState.setFromColorInt(activeColState.previousColor, recordPrevious = true)
+                applyLiveBackgroundColorChange()
             }
             "PICK_COMP_COLOR", "PICK_HIST_COLOR" -> {
-                colorState.setFromColorInt(hit.arg1, recordPrevious = true)
+                activeColState.setFromColorInt(hit.arg1, recordPrevious = true)
+                applyLiveBackgroundColorChange()
             }
             "CYCLE_HARMONY_MODE" -> {
-                colorState.harmonyMode = (colorState.harmonyMode + 1) % 4
+                activeColState.harmonyMode = (activeColState.harmonyMode + 1) % 4
             }
             "SHUFFLE_HISTORY_BAR" -> {
-                colorState.pushToHistory(ColorStudioState.hslToColor(Random.nextFloat() * 360f, 0.8f, 0.55f))
+                activeColState.pushToHistory(ColorStudioState.hslToColor(Random.nextFloat() * 360f, 0.8f, 0.55f))
             }
             "TOGGLE_COLORLESS_ERASER" -> {
                 colorState.isColorlessEraser = !colorState.isColorlessEraser
@@ -1510,16 +1788,17 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
             }
             "ACTIVATE_EYEDROPPER" -> {
                 hostView.popupState = TopPopupState.NONE
-                hostView.activateOnCanvasEyedropper()
+                hostView.activateOnCanvasEyedropper(forBackground = isBgColorMode)
             }
             "EDIT_HEX_COLOR" -> {
-                val curHex = String.format("%06X", 0xFFFFFF and colorState.currentColor)
+                val curHex = String.format("%06X", 0xFFFFFF and activeColState.currentColor)
                 hostView.showSimpleInputModal("HEX Color (#RRGGBB)", curHex) { input ->
                     val cleaned = input.trim().removePrefix("#")
                     if (cleaned.length == 6) {
                         try {
                             val parsed = Color.parseColor("#$cleaned")
-                            colorState.setFromColorInt(parsed, recordPrevious = true)
+                            activeColState.setFromColorInt(parsed, recordPrevious = true)
+                            applyLiveBackgroundColorChange()
                         } catch (_: Exception) {}
                     }
                     hostView.invalidate()
@@ -1527,15 +1806,20 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
             }
             "COLOR_BOTTOM_MODE" -> {
                 when (hit.arg1) {
-                    0, 1 -> colorState.bottomModeIndex = hit.arg1
-                    2 -> colorState.topTabIndex = if (colorState.topTabIndex == 1) 0 else 1
+                    0, 1 -> activeColState.bottomModeIndex = hit.arg1
+                    2 -> {
+                        if (isBgColorMode) {
+                            bgColorState.topTabIndex = 1
+                        } else {
+                            colorState.topTabIndex = if (colorState.topTabIndex == 1) 0 else 1
+                        }
+                    }
                     3 -> {
                         val randCol = ColorStudioState.hslToColor(Random.nextFloat() * 360f, Random.nextFloat().coerceIn(0.4f, 1f), Random.nextFloat().coerceIn(0.25f, 0.8f))
-                        colorState.setFromColorInt(randCol, recordPrevious = true)
+                        activeColState.setFromColorInt(randCol, recordPrevious = true)
+                        applyLiveBackgroundColorChange()
                     }
-                    4 -> {
-                        colorState.harmonyMode = (colorState.harmonyMode + 1) % 4
-                    }
+                    4 -> activeColState.harmonyMode = (activeColState.harmonyMode + 1) % 4
                 }
             }
         }
@@ -1545,6 +1829,8 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
         val rect = sliderRects[id] ?: return
         val f = ((touchX - rect.left) / rect.width()).coerceIn(0f, 1f)
         val b = selectedBrush()
+        val activeColState = if (activeBgModeInTouch) bgColorState else colorState
+        val cfg = hostView.project.backgroundConfig
 
         when (id) {
             "SLIDER_BASIC_SIZE" -> b.size = 1f + f * 299f
@@ -1560,39 +1846,54 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
             "ADV_RAND_SIZE" -> b.sizeJitter = f * 100f
             "ADV_RAND_OPAC" -> b.opacityJitter = f * 100f
             "ADV_RAND_SCATTER" -> b.scatterJitter = f * 100f
+            "BG_SURF_INTENSITY" -> { cfg.grainIntensity = f * 100f; hostView.project.isDirty = true }
+            "BG_SURF_SCALE" -> { cfg.textureScale = 25f + f * 225f; hostView.project.isDirty = true }
+            "BG_SURF_WARMTH" -> { cfg.warmthTint = -50f + f * 100f; hostView.project.isDirty = true }
+            "BG_GRID_SPACING" -> { cfg.gridSpacing = 20f + f * 280f; hostView.project.isDirty = true }
+            "BG_GRID_OPACITY" -> { cfg.gridOpacity = 5f + f * 95f; hostView.project.isDirty = true }
+            "BG_GRID_SUBDIV" -> { cfg.gridSubdivisions = 1f + f * 7f; hostView.project.isDirty = true }
+            "BG_LIGHT_STRENGTH" -> { cfg.vignetteStrength = f * 100f; hostView.project.isDirty = true }
+            "BG_LIGHT_SOFT" -> { cfg.vignetteSoftness = 10f + f * 90f; hostView.project.isDirty = true }
+            "BG_LIGHT_ELEV" -> { cfg.focusElevation = f * 100f; hostView.project.isDirty = true }
             "COLOR_H" -> {
-                colorState.hue = f * 360f
-                colorState.syncColorFromHsl()
+                activeColState.hue = f * 360f
+                activeColState.syncColorFromHsl()
+                applyLiveBackgroundColorChange()
             }
             "COLOR_S" -> {
-                colorState.saturation = f
-                colorState.syncColorFromHsl()
+                activeColState.saturation = f
+                activeColState.syncColorFromHsl()
+                applyLiveBackgroundColorChange()
             }
             "COLOR_L" -> {
-                colorState.lightness = f
-                colorState.syncColorFromHsl()
+                activeColState.lightness = f
+                activeColState.syncColorFromHsl()
+                applyLiveBackgroundColorChange()
             }
             "COLOR_R" -> {
                 val nr = (f * 255f).roundToInt().coerceIn(0, 255)
-                colorState.setFromColorInt(Color.rgb(nr, Color.green(colorState.currentColor), Color.blue(colorState.currentColor)))
+                activeColState.setFromColorInt(Color.rgb(nr, Color.green(activeColState.currentColor), Color.blue(activeColState.currentColor)))
+                applyLiveBackgroundColorChange()
             }
             "COLOR_G" -> {
                 val ng = (f * 255f).roundToInt().coerceIn(0, 255)
-                colorState.setFromColorInt(Color.rgb(Color.red(colorState.currentColor), ng, Color.blue(colorState.currentColor)))
+                activeColState.setFromColorInt(Color.rgb(Color.red(activeColState.currentColor), ng, Color.blue(activeColState.currentColor)))
+                applyLiveBackgroundColorChange()
             }
             "COLOR_B" -> {
                 val nb = (f * 255f).roundToInt().coerceIn(0, 255)
-                colorState.setFromColorInt(Color.rgb(Color.red(colorState.currentColor), Color.green(colorState.currentColor), nb))
+                activeColState.setFromColorInt(Color.rgb(Color.red(activeColState.currentColor), Color.green(activeColState.currentColor), nb))
+                applyLiveBackgroundColorChange()
             }
         }
     }
 
-    private fun updateHueFromTouch(x: Float, y: Float) {
+    private fun updateHueFromTouch(x: Float, y: Float, state: ColorStudioState) {
         var deg = Math.toDegrees(atan2((y - wheelCy).toDouble(), (x - wheelCx).toDouble())).toFloat()
         if (deg < 0f) deg += 360f
-        // Map wheel angle (clockwise from right) to HSL Hue (0..360)
-        colorState.hue = (360f - deg) % 360f
-        colorState.syncColorFromHsl()
+        state.hue = (360f - deg) % 360f
+        state.syncColorFromHsl()
+        applyLiveBackgroundColorChange()
     }
 
     private fun hueToWheelAngleRad(hue: Float): Double {
@@ -1600,34 +1901,38 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
         return Math.toRadians(deg.toDouble())
     }
 
-    private fun updateSlFromDiamondTouch(x: Float, y: Float) {
+    private fun updateSlFromDiamondTouch(x: Float, y: Float, state: ColorStudioState) {
         val rawDx = (x - wheelCx) / diamondHalfDiag
         val rawDy = (y - wheelCy) / diamondHalfDiag
 
         val snapRadius = 0.16f
         when {
             hypot(rawDx, rawDy + 1f) < snapRadius || (rawDy <= -0.96f && abs(rawDx) < 0.25f) -> {
-                colorState.lightness = 1.0f
-                colorState.saturation = 0.0f
-                colorState.syncColorFromHsl()
+                state.lightness = 1.0f
+                state.saturation = 0.0f
+                state.syncColorFromHsl()
+                applyLiveBackgroundColorChange()
                 return
             }
             hypot(rawDx, rawDy - 1f) < snapRadius || (rawDy >= 0.96f && abs(rawDx) < 0.25f) -> {
-                colorState.lightness = 0.0f
-                colorState.saturation = 0.0f
-                colorState.syncColorFromHsl()
+                state.lightness = 0.0f
+                state.saturation = 0.0f
+                state.syncColorFromHsl()
+                applyLiveBackgroundColorChange()
                 return
             }
             hypot(rawDx - 1f, rawDy) < snapRadius || (rawDx >= 0.94f && abs(rawDy) < 0.28f) -> {
-                colorState.lightness = 0.5f
-                colorState.saturation = 1.0f
-                colorState.syncColorFromHsl()
+                state.lightness = 0.5f
+                state.saturation = 1.0f
+                state.syncColorFromHsl()
+                applyLiveBackgroundColorChange()
                 return
             }
             hypot(rawDx + 1f, rawDy) < snapRadius || (rawDx <= -0.94f && abs(rawDy) < 0.28f) -> {
-                colorState.lightness = 0.5f
-                colorState.saturation = 0.0f
-                colorState.syncColorFromHsl()
+                state.lightness = 0.5f
+                state.saturation = 0.0f
+                state.syncColorFromHsl()
+                applyLiveBackgroundColorChange()
                 return
             }
         }
@@ -1637,9 +1942,10 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
         val maxSpanX = (1f - abs(dy)).coerceAtLeast(0.005f)
         val dxClamped = rawDx.coerceIn(-maxSpanX, maxSpanX)
         val s = (((dxClamped / maxSpanX) + 1f) * 0.5f).coerceIn(0f, 1f)
-        colorState.lightness = l
-        colorState.saturation = s
-        colorState.syncColorFromHsl()
+        state.lightness = l
+        state.saturation = s
+        state.syncColorFromHsl()
+        applyLiveBackgroundColorChange()
     }
 
     private fun slToDiamondPoint(s: Float, l: Float, cx: Float, cy: Float, halfDiag: Float): PointF {
@@ -1657,16 +1963,17 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
             c.drawColor(Color.WHITE)
             drawRealisticBrushIcon(c, RectF(28f, 28f, 228f, 228f), brush.iconStyle, 1.5f)
             val tmpProj = SketchProjectState(name = "${brush.name}_icon", width = 256, height = 256)
-            tmpProj.canvasBitmap = bmp
-            val res = ProjectStorageManager.saveProjectToDevice(hostView.context, tmpProj, asCopy = false, paperColor = Color.WHITE)
+            tmpProj.ensureLayersInitialized()
+            val lc = Canvas(tmpProj.activeLayer().bitmap)
+            lc.drawBitmap(bmp, 0f, 0f, null)
+            bmp.recycle()
+            val res = ProjectStorageManager.saveProjectToDevice(hostView.context, tmpProj, asCopy = false)
             res.onSuccess { p -> hostView.showBanner("Exported Icon -> $p") }
                 .onFailure { hostView.showBanner("Export failed") }
+            tmpProj.releaseAll()
         } catch (_: Exception) {}
     }
 
-    // ==========================================================================
-    // PRECISION VECTOR TOOL & UI ICONS FOR BRUSH AND COLOR MODALS
-    // ==========================================================================
     private fun drawLibraryTabIcon(c: Canvas, cx: Float, cy: Float, size: Float) {
         fillPaint.color = Color.rgb(225, 225, 225)
         strokePaint.color = Color.rgb(225, 225, 225)
@@ -1913,10 +2220,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
         c.drawPath(p2, fillPaint)
     }
 
-    /**
-     * Draws realistic multi-layered SketchBook brush & texture thumbnails matching 115925.jpg & 115929.jpg.
-     */
-    
     fun drawRealisticBrushIcon(c: Canvas, box: RectF, style: BrushIconStyle, sx: Float) {
         val cx = box.centerX()
         val cy = box.centerY()
@@ -1927,7 +2230,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
 
         when (style) {
             BrushIconStyle.WOOD_PENCIL -> {
-                // Wood cone
                 val cone = Path().apply {
                     moveTo(cx, top + h * 0.06f)
                     lineTo(cx - w * 0.28f, top + h * 0.58f)
@@ -1936,7 +2238,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
                 }
                 fillPaint.color = Color.rgb(218, 188, 158)
                 c.drawPath(cone, fillPaint)
-                // Graphite lead tip
                 val tip = Path().apply {
                     moveTo(cx, top + h * 0.06f)
                     lineTo(cx - w * 0.10f, top + h * 0.25f)
@@ -1945,13 +2246,11 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
                 }
                 fillPaint.color = Color.rgb(42, 42, 42)
                 c.drawPath(tip, fillPaint)
-                // Dark body + gold ferrule band
                 fillPaint.color = Color.rgb(38, 38, 38)
                 c.drawRect(cx - w * 0.28f, top + h * 0.58f, cx + w * 0.28f, bot - h * 0.06f, fillPaint)
                 fillPaint.color = Color.rgb(205, 180, 115)
                 c.drawRect(cx - w * 0.28f, bot - h * 0.22f, cx + w * 0.28f, bot - h * 0.14f, fillPaint)
             }
-
             BrushIconStyle.HARD_ERASER, BrushIconStyle.SOFT_ERASER -> {
                 fillPaint.color = Color.rgb(235, 235, 235)
                 val isRound = (style == BrushIconStyle.SOFT_ERASER)
@@ -1963,7 +2262,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
                 fillPaint.color = Color.rgb(125, 130, 135)
                 c.drawRect(cx - w * 0.40f, top + h * 0.52f, cx + w * 0.40f, bot - h * 0.08f, fillPaint)
             }
-
             BrushIconStyle.CHISEL_MARKER -> {
                 val nib = Path().apply {
                     moveTo(cx - w * 0.14f, top + h * 0.12f)
@@ -1979,7 +2277,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
                 fillPaint.color = Color.rgb(205, 180, 115)
                 c.drawRect(cx - w * 0.26f, top + h * 0.48f, cx + w * 0.26f, top + h * 0.62f, fillPaint)
             }
-
             BrushIconStyle.AIRBRUSH -> {
                 fillPaint.color = Color.rgb(75, 75, 75)
                 c.drawRect(cx - w * 0.14f, top + h * 0.12f, cx + w * 0.14f, top + h * 0.34f, fillPaint)
@@ -1995,7 +2292,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
                 fillPaint.color = Color.rgb(65, 65, 65)
                 c.drawRect(cx - w * 0.36f, top + h * 0.64f, cx + w * 0.36f, bot - h * 0.08f, fillPaint)
             }
-
             BrushIconStyle.TECHNICAL_PEN -> {
                 fillPaint.color = Color.rgb(90, 90, 90)
                 c.drawRect(cx - w * 0.04f, top + h * 0.06f, cx + w * 0.04f, top + h * 0.24f, fillPaint)
@@ -2013,7 +2309,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
                 fillPaint.color = Color.rgb(205, 182, 120)
                 c.drawRect(cx - w * 0.28f, bot - h * 0.18f, cx + w * 0.28f, bot - h * 0.10f, fillPaint)
             }
-
             BrushIconStyle.FOUNTAIN_PEN -> {
                 val nib = Path().apply {
                     moveTo(cx, top + h * 0.08f)
@@ -2031,7 +2326,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
                 fillPaint.color = Color.rgb(65, 65, 65)
                 c.drawRect(cx - w * 0.18f, top + h * 0.72f, cx + w * 0.18f, bot - h * 0.08f, fillPaint)
             }
-
             BrushIconStyle.ROUND_BRUSH, BrushIconStyle.FELT_PEN -> {
                 val hair = Path().apply {
                     moveTo(cx, top + h * 0.08f)
@@ -2047,7 +2341,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
                 fillPaint.color = Color.rgb(45, 45, 45)
                 c.drawRect(cx - w * 0.22f, top + h * 0.74f, cx + w * 0.22f, bot - h * 0.08f, fillPaint)
             }
-
             BrushIconStyle.BLENDER_CONE -> {
                 val cone = Path().apply {
                     moveTo(cx, top + h * 0.10f)
@@ -2060,14 +2353,12 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
                 fillPaint.color = Color.rgb(75, 75, 75)
                 c.drawRect(cx - w * 0.22f, top + h * 0.72f, cx + w * 0.22f, bot - h * 0.08f, fillPaint)
             }
-
             BrushIconStyle.PASTEL_BLOCK, BrushIconStyle.CHARCOAL_STICK -> {
                 fillPaint.color = Color.rgb(38, 38, 38)
                 c.drawRoundRect(RectF(cx - w * 0.22f, top + h * 0.24f, cx + w * 0.22f, bot - h * 0.08f), 6f * sx, 6f * sx, fillPaint)
                 fillPaint.color = Color.rgb(205, 182, 120)
                 c.drawRect(cx - w * 0.22f, bot - h * 0.22f, cx + w * 0.22f, bot - h * 0.14f, fillPaint)
             }
-
             BrushIconStyle.FLAT_BRISTLE, BrushIconStyle.FAN_BRUSH -> {
                 fillPaint.color = if (style == BrushIconStyle.FAN_BRUSH) Color.rgb(215, 215, 215) else Color.rgb(118, 86, 56)
                 val topW = if (style == BrushIconStyle.FAN_BRUSH) w * 0.36f else w * 0.24f
@@ -2084,7 +2375,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
                 fillPaint.color = Color.rgb(55, 55, 55)
                 c.drawRect(cx - w * 0.26f, top + h * 0.76f, cx + w * 0.26f, bot - h * 0.08f, fillPaint)
             }
-
             BrushIconStyle.DIAMOND_SHADER -> {
                 val p = Path().apply {
                     moveTo(cx, top + h * 0.14f)
@@ -2096,8 +2386,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
                 fillPaint.color = Color.rgb(22, 22, 22)
                 c.drawPath(p, fillPaint)
             }
-
-            // Procedural Texture Thumbnails matching 115929.jpg
             BrushIconStyle.TEXTURE_FRACTAL -> {
                 fillPaint.shader = LinearGradient(box.left, box.top, box.right, box.bottom, Color.rgb(18, 32, 78), Color.rgb(0, 185, 215), Shader.TileMode.CLAMP)
                 c.drawRect(box, fillPaint)
@@ -2108,7 +2396,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
                 c.drawLine(box.right, box.top, box.left, box.bottom, strokePaint)
                 c.drawCircle(cx, box.centerY(), w * 0.28f, strokePaint)
             }
-
             BrushIconStyle.TEXTURE_HATCH -> {
                 fillPaint.color = Color.rgb(62, 62, 62)
                 c.drawRect(box, fillPaint)
@@ -2120,7 +2407,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
                     c.drawLine(box.right - off, box.top, box.right, box.top + off, strokePaint)
                 }
             }
-
             BrushIconStyle.TEXTURE_FROST, BrushIconStyle.TEXTURE_SPLATTER -> {
                 fillPaint.color = Color.rgb(22, 22, 22)
                 c.drawRect(box, fillPaint)
@@ -2133,7 +2419,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
                     c.drawLine(cx, by, cx + cos(rad).toFloat() * r, by + sin(rad).toFloat() * r, strokePaint)
                 }
             }
-
             BrushIconStyle.TEXTURE_NOISE -> {
                 fillPaint.color = Color.rgb(35, 35, 35)
                 c.drawRect(box, fillPaint)
@@ -2147,7 +2432,6 @@ class BrushAndColorModal(private val hostView: SketchWorkspaceView) {
                     }
                 }
             }
-
             BrushIconStyle.TEXTURE_GRID -> {
                 fillPaint.color = Color.rgb(25, 25, 45)
                 c.drawRect(box, fillPaint)
